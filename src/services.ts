@@ -1,0 +1,198 @@
+import { invoke } from '@tauri-apps/api/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
+import type { Account, ApiKey, AppState, CheckinResponse, CheckinStatusResponse, ModelInfo, OAuthCompleteResponse, OAuthStartResponse, ServiceConfig } from './types';
+import { defaultState } from './types';
+
+const STORAGE_KEY = 'coderelay-app-state';
+const CREDENTIALS_KEY = 'coderelay-local-credentials';
+const SERVICE_URL = 'http://127.0.0.1:11435';
+
+
+function hasTauri() {
+  return Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+}
+
+function mergeState(value: Partial<AppState> | null | undefined): AppState {
+  return {
+    ...structuredClone(defaultState),
+    ...(value ?? {}),
+    config: { ...defaultState.config, ...(value?.config ?? {}) },
+    stats: { ...defaultState.stats, ...(value?.stats ?? {}) },
+  };
+}
+
+function loadLocal(): AppState {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored) return mergeState(JSON.parse(stored) as Partial<AppState>);
+  } catch {
+    // Use an empty, non-demo state when local preview data is invalid.
+  }
+  return structuredClone(defaultState);
+}
+
+function saveLocal(state: AppState) {
+  const safeState = structuredClone(state);
+  for (const account of safeState.accounts) {
+    delete account.accessToken;
+    delete account.refreshToken;
+  }
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(safeState));
+}
+
+function savePreviewCredentials(accounts: Account[]) {
+  const credentials = accounts.filter((account) => account.accessToken).map((account) => ({ id: account.id, accessToken: account.accessToken, refreshToken: account.refreshToken }));
+  localStorage.setItem(CREDENTIALS_KEY, JSON.stringify(credentials));
+}
+
+async function invokeState(command: string, args?: Record<string, unknown>): Promise<AppState> {
+  return mergeState(await invoke<Partial<AppState>>(command, args));
+}
+
+export async function getState(): Promise<AppState> {
+  if (hasTauri()) {
+    try { return await invokeState('get_app_state'); } catch { /* Use preview storage. */ }
+  }
+  return loadLocal();
+}
+
+export async function saveConfig(config: ServiceConfig): Promise<AppState> {
+  if (hasTauri()) {
+    try { return await invokeState('save_service_config', { config }); } catch (error) { throw new Error(String(error)); }
+  }
+  const state = loadLocal();
+  state.config = { ...config, enabled: state.running };
+  saveLocal(state);
+  return state;
+}
+
+export async function startService(): Promise<AppState> {
+  if (hasTauri()) return invokeState('start_service');
+  const state = loadLocal();
+  const credentials = JSON.parse(localStorage.getItem(CREDENTIALS_KEY) ?? '[]') as Array<{ id: string; accessToken?: string }>;
+  const credentialIds = new Set(credentials.filter((item) => item.accessToken).map((item) => item.id));
+  if (!state.accounts.some((account) => account.status !== 'disabled' && credentialIds.has(account.id))) {
+    throw new Error('没有带有效 Token 的 CodeBuddy 中国站账号');
+  }
+  if (!state.keys.some((key) => key.enabled)) throw new Error('没有启用的 API Key');
+  state.running = true;
+  state.config.enabled = true;
+  state.actualPort = state.config.port;
+  state.lastError = null;
+  saveLocal(state);
+  return state;
+}
+
+export async function stopService(): Promise<AppState> {
+  if (hasTauri()) return invokeState('stop_service');
+  const state = loadLocal();
+  state.running = false;
+  state.config.enabled = false;
+  state.actualPort = null;
+  saveLocal(state);
+  return state;
+}
+
+export async function saveAccounts(accounts: Account[]): Promise<AppState> {
+  if (hasTauri()) return invokeState('save_accounts', { accounts });
+  const state = loadLocal();
+  state.accounts = accounts.map(({ accessToken: _accessToken, refreshToken: _refreshToken, ...account }) => account);
+  savePreviewCredentials(accounts);
+  saveLocal(state);
+  return state;
+}
+
+export async function saveKeys(keys: ApiKey[]): Promise<AppState> {
+  if (hasTauri()) return invokeState('save_api_keys', { keys });
+  const state = loadLocal();
+  state.keys = keys;
+  saveLocal(state);
+  return state;
+}
+
+export async function clearLogs(): Promise<AppState> {
+  if (hasTauri()) return invokeState('clear_request_logs');
+  const state = loadLocal();
+  state.logs = [];
+  saveLocal(state);
+  return state;
+}
+
+export async function listModels(port = 11435, apiKey?: string): Promise<ModelInfo[]> {
+  const response = await fetch(`http://127.0.0.1:${port}/v1/models`, {
+    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+  });
+  if (!response.ok) throw new Error(`模型同步失败：HTTP ${response.status}`);
+  const payload = await response.json() as { data?: ModelInfo[] };
+  return payload.data ?? [];
+}
+
+function requireTauri(feature: string) {
+  if (!hasTauri()) throw new Error(`${feature}需要桌面端环境，浏览器预览中不可用`);
+}
+
+export async function startOAuth(): Promise<OAuthStartResponse> {
+  requireTauri('浏览器认证');
+  return invoke<OAuthStartResponse>('codebuddy_oauth_start');
+}
+
+export async function completeOAuth(loginId: string): Promise<OAuthCompleteResponse> {
+  requireTauri('浏览器认证');
+  return invoke<OAuthCompleteResponse>('codebuddy_oauth_complete', { loginId });
+}
+
+export async function cancelOAuth(loginId: string): Promise<void> {
+  if (!hasTauri()) return;
+  await invoke('codebuddy_oauth_cancel', { loginId });
+}
+
+export async function validateToken(accessToken: string): Promise<OAuthCompleteResponse> {
+  requireTauri('Token 验证');
+  return invoke<OAuthCompleteResponse>('codebuddy_validate_token', { accessToken });
+}
+
+export async function openExternal(url: string): Promise<void> {
+  requireTauri('打开系统浏览器');
+  await openUrl(url);
+}
+
+export interface RefreshAllResponse {
+  state: AppState;
+  refreshed: number;
+  failed: number;
+  skipped: number;
+}
+
+export async function refreshAccountQuota(accountId: string): Promise<AppState> {
+  requireTauri('刷新额度');
+  return invokeState('refresh_account_quota', { accountId });
+}
+
+export async function refreshAllQuotas(): Promise<RefreshAllResponse> {
+  requireTauri('刷新额度');
+  const response = await invoke<{ state: Partial<AppState>; refreshed: number; failed: number; skipped: number }>('refresh_all_quotas');
+  return {
+    state: mergeState(response.state),
+    refreshed: response.refreshed,
+    failed: response.failed,
+    skipped: response.skipped,
+  };
+}
+
+export async function getCheckinStatus(accountId: string): Promise<CheckinStatusResponse> {
+  requireTauri('签到');
+  return invoke<CheckinStatusResponse>('codebuddy_checkin_status', { accountId });
+}
+
+export async function checkinAccount(accountId: string): Promise<CheckinResponse> {
+  requireTauri('签到');
+  return invoke<CheckinResponse>('codebuddy_checkin', { accountId });
+}
+
+export function resetLocalState() {
+  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(CREDENTIALS_KEY);
+  window.location.reload();
+}
+
+export { SERVICE_URL, CREDENTIALS_KEY };
