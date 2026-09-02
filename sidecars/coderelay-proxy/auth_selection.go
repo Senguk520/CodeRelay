@@ -1486,12 +1486,18 @@ func errorCategory(status int, body string, success bool) string {
 }
 
 type authHook struct {
-	manifest *manifest
-	emitter  *eventEmitter
+	manifest      *manifest
+	emitter       *eventEmitter
+	syncCodebuddy func() // 可选回调：codebuddy 账号注册时触发一次模型同步
 }
 
 func (h *authHook) OnAuthRegistered(_ context.Context, auth *coreauth.Auth) {
 	h.emit("auth_registered", auth)
+	// 导入 codebuddy 账号时自动执行一次模型同步并持久化，避免模型清单真空
+	// 导致「未查询到可用模型」。异步执行，不阻塞账号注册流程。
+	if h.syncCodebuddy != nil && auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "codebuddy") {
+		go h.syncCodebuddy()
+	}
 }
 
 func (h *authHook) OnAuthUpdated(_ context.Context, auth *coreauth.Auth) {

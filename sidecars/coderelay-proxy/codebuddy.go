@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 	codebuddyauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codebuddy"
 	internalregistry "github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -135,7 +136,7 @@ type codebuddyModelsResponse struct {
 //
 // This is the preferred source over app.asar extraction because the backend
 // exposes models (e.g. glm-5.3) that may not yet be bundled in the local client.
-func syncCodebuddyModelsFromBackend(auths []*coreauth.Auth) []string {
+func syncCodebuddyModelsFromBackend(auths []*coreauth.Auth, cachePath string) []string {
 	var creds codebuddyauth.Creds
 	for _, a := range auths {
 		if a == nil {
@@ -215,7 +216,16 @@ func syncCodebuddyModelsFromBackend(auths []*coreauth.Auth) []string {
 	models = probeCodebuddyModelAvailability(creds, models)
 
 	// 安装到 registry（去重、排序、变更检测、刷新通知）。
-	return internalregistry.InstallCodebuddyModels(models)
+	ids := internalregistry.InstallCodebuddyModels(models)
+
+	// 同步成功后持久化到本地缓存，供下次启动/刷新账号时兜底加载，避免
+	// 依赖异步后端同步导致的「未查询到可用模型」真空期。
+	if strings.TrimSpace(cachePath) != "" && len(models) > 0 {
+		if err := saveCodebuddyModelCache(cachePath, models); err != nil {
+			log.Warnf("codebuddy model sync: persist cache failed: %v", err)
+		}
+	}
+	return ids
 }
 
 // codebuddyAvailabilityProbeConcurrency caps the number of concurrent
@@ -305,7 +315,7 @@ func (s *relayServer) handleCodebuddySyncModels(c *gin.Context) {
 
 	// 仅从腾讯后端动态拉取（需要 CodeBuddy 账号 access_token）。
 	if s.authManager != nil {
-		synced = syncCodebuddyModelsFromBackend(s.authManager.List())
+		synced = syncCodebuddyModelsFromBackend(s.authManager.List(), codebuddyModelCachePath(s.manifestPath))
 	}
 
 	refreshed := false

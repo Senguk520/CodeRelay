@@ -122,8 +122,19 @@ func main() {
 		emitter.emit(map[string]any{"type": "error", "message": err.Error()})
 		os.Exit(2)
 	}
-	// CodeBuddy 模型清单仅由后端动态同步填充（见下方同步 goroutine），
-	// 不再从本机官方客户端 app.asar 提取，避免本地过期清单污染 /v1/models。
+	// CodeBuddy 模型清单优先从本地缓存加载（由「导入账号」或「手动同步」时
+	// 持久化），避免启动后依赖异步后端同步导致的「未查询到可用模型」真空期。
+	// 缓存缺失时回退到后端同步（在导入账号时触发）。
+	emitter.emitStartupStage("load_codebuddy_model_cache")
+	if cached, errCache := loadCodebuddyModelCache(codebuddyModelCachePath(*manifestPath)); errCache == nil {
+		if ids := internalregistry.InstallCodebuddyModels(cached); len(ids) > 0 {
+			m.setModelIDs(ids)
+			emitter.emit(map[string]any{
+				"type":    "codebuddy_model_cache_loaded",
+				"message": fmt.Sprintf("codebuddy models loaded from cache (%d entries)", len(ids)),
+			})
+		}
+	}
 	emitter.emitStartupStage("init_runtime")
 	quotaState := newQuotaReserveStateStore(*quotaReserveStatePath, m)
 	if err := quotaState.load(); err != nil {
@@ -168,45 +179,22 @@ func main() {
 		os.Exit(1)
 	}
 	defer runtime.Stop()
-	// Periodically re-sync the CodeBuddy model catalog from the Tencent backend
-	// so backend model releases (e.g. glm-5.3) are picked up without a full
-	// sidecar restart. The backend is the sole source of truth; there is no
-	// app.asar / static-manifest fallback.
-	go func() {
-		const codebuddySyncInterval = 3 * time.Hour
-		syncOnce := func() {
-			// CodeBuddy 模型清单仅以腾讯后端为准，不做 app.asar 回退，
-			// 避免把本地过期/不可用的模型混进 /v1/models。
-			var synced []string
-			if coreManager != nil {
-				synced = syncCodebuddyModelsFromBackend(coreManager.List())
-			}
-			if len(synced) == 0 {
-				return
-			}
-			if !m.setModelIDs(synced) {
-				return
-			}
-			internalregistry.NotifyCodebuddyModelRefresh()
-			emitter.emit(map[string]any{
-				"type":    "codebuddy_model_sync",
-				"message": fmt.Sprintf("codebuddy models updated to %d entries (source=tencent-backend)", len(synced)),
-			})
+	// 导入 codebuddy 账号时自动执行一次模型同步并持久化；不做定时自动拉取，
+	// 以最大程度节省资源。手动「同步模型」按钮仍会覆盖本地缓存。
+	hook.syncCodebuddy = func() {
+		synced := syncCodebuddyModelsFromBackend(coreManager.List(), codebuddyModelCachePath(*manifestPath))
+		if len(synced) == 0 {
+			return
 		}
-		// Run once immediately after the auth manager is ready so backend-only
-		// models (e.g. glm-5.3) become available without waiting for the ticker.
-		syncOnce()
-		ticker := time.NewTicker(codebuddySyncInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				syncOnce()
-			}
+		if !m.setModelIDs(synced) {
+			return
 		}
-	}()
+		internalregistry.NotifyCodebuddyModelRefresh()
+		emitter.emit(map[string]any{
+			"type":    "codebuddy_model_sync",
+			"message": fmt.Sprintf("codebuddy models updated to %d entries (source=tencent-backend)", len(synced)),
+		})
+	}
 	emitter.emitStartupStage("start_http_server")
 
 	// Reuse the same coreManager so WS upgrades share OAuth pool, routing and
@@ -223,6 +211,7 @@ func main() {
 		runtime:            runtime,
 		cfg:                cfg,
 		manifest:           m,
+		manifestPath:       *manifestPath,
 		authManager:        coreManager,
 		emitter:            emitter,
 		policy:             policy,

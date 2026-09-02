@@ -32,6 +32,7 @@ type relayServer struct {
 	runtime            executorRuntime
 	cfg                *config.Config
 	manifest           *manifest
+	manifestPath       string
 	authManager        *coreauth.Manager
 	emitter            *eventEmitter
 	policy             *requestPolicy
