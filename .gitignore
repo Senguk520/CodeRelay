@@ -6,3 +6,5 @@ sidecars/coderelay-proxy/bin/*
 !sidecars/coderelay-proxy/bin/.gitkeep
 *.log
 .env*
+.venv
+.codebuddy/
