@@ -62,6 +62,15 @@ func (s *relayServer) streamTimeoutsForRequest(r *http.Request, body []byte, mod
 		profile.open = durationFromConfigMillis(s.cfg.Streaming.StreamOpenTimeoutMS, profile.open)
 		profile.idle = durationFromConfigMillis(s.cfg.Streaming.StreamIdleTimeoutMS, profile.idle)
 	}
+	// Requests carrying vision input are handled by the codebuddy vision
+	// sub-agent loop, which performs multiple rounds of upstream calls before
+	// emitting content. Give them a much longer idle timeout so the relay
+	// watchdog does not cancel mid-loop.
+	if providerGatewayRequestHasVisionInput(body) {
+		if profile.idle < visionAgenticStreamIdleTimeout {
+			profile.idle = visionAgenticStreamIdleTimeout
+		}
+	}
 	if !isImageGenerationRequest(r, body, model) {
 		return profile
 	}

@@ -186,6 +186,14 @@ func (e *CodebuddyExecutor) doCodebuddyChatRequest(
 	// ceiling, matching the normal request path.
 	body = clampCodebuddyMaxTokens(body, gjson.GetBytes(body, "model").String())
 
+	// Normalize tool-related message fields so the strict backend does not
+	// reject accumulated tool-calling rounds with 400 invalid_parameter_value,
+	// matching the normal request path.
+	body, err = normalizeCodebuddyToolMessages(body)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	url := baseURL + codebuddy.ChatPath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -276,10 +284,19 @@ func (e *CodebuddyExecutor) runAgenticLoop(
 	visionModel string,
 	maxRounds int,
 	reporter *helps.UsageReporter,
+	heartbeat func(),
 ) ([]byte, http.Header, error) {
 	var lastAggregated []byte
 	var lastHeaders http.Header
 	var totalUsage usage.Detail
+
+	// beat emits a downstream keep-alive if the caller supplied one. It is nil
+	// safe so the non-streaming path can pass nil.
+	beat := func() {
+		if heartbeat != nil {
+			heartbeat()
+		}
+	}
 
 	// Publish the aggregated usage of the whole agentic loop exactly once,
 	// regardless of which return path terminates the loop. The reporter is
@@ -295,7 +312,9 @@ func (e *CodebuddyExecutor) runAgenticLoop(
 	}()
 
 	for round := 0; round < maxRounds; round++ {
+		beat()
 		aggregated, headers, err := e.doCodebuddyChatRequest(ctx, auth, creds, baseURL, body)
+		beat()
 		if err != nil {
 			if lastAggregated != nil {
 				return lastAggregated, lastHeaders, nil
@@ -337,9 +356,11 @@ func (e *CodebuddyExecutor) runAgenticLoop(
 
 			var answer string
 			if imageID >= 1 && imageID <= len(images) {
+				beat()
 				a, inspectUsage, inspectErr := e.inspectCodebuddyImage(
 					ctx, auth, creds, baseURL, images[imageID-1].partJSON, question, visionModel,
 				)
+				beat()
 				if inspectErr != nil {
 					answer = fmt.Sprintf("[图片查看失败: %v]", inspectErr)
 					log.Warnf("codebuddy vision agentic: inspect_image(%d) failed: %v", imageID, inspectErr)
@@ -434,7 +455,7 @@ func (e *CodebuddyExecutor) executeCodebuddyVisionAgentic(
 	log.Infof("codebuddy vision agentic: %d images, model=%s, vision=%s, maxRounds=%d",
 		len(images), baseModel, visionModel, maxRounds)
 
-	aggregated, headers, err := e.runAgenticLoop(ctx, auth, creds, baseURL, body, images, visionModel, maxRounds, reporter)
+	aggregated, headers, err := e.runAgenticLoop(ctx, auth, creds, baseURL, body, images, visionModel, maxRounds, reporter, nil)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -504,8 +525,19 @@ func (e *CodebuddyExecutor) executeCodebuddyVisionAgenticStream(
 			return
 		}
 
+		// heartbeat keeps the downstream SSE connection alive while the agentic
+		// loop performs its multi-round (10-30s) upstream calls without emitting
+		// any visible content. It sends an SSE comment keep-alive so the relay's
+		// stream idle watchdog does not trip mid-loop.
+		heartbeat := func() {
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Payload: []byte(": keep-alive\n\n")}:
+			case <-ctx.Done():
+			}
+		}
+
 		// 2. Run the loop (blocking; may take 10-30s).
-		aggregated, _, loopErr := e.runAgenticLoop(ctx, auth, creds, baseURL, body, images, visionModel, maxRounds, reporter)
+		aggregated, _, loopErr := e.runAgenticLoop(ctx, auth, creds, baseURL, body, images, visionModel, maxRounds, reporter, heartbeat)
 		if loopErr != nil || aggregated == nil {
 			// Surface the failure as visible assistant content instead of a
 			// silent empty response, and log the full error for diagnosis.

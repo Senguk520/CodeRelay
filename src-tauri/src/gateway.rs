@@ -672,6 +672,10 @@ fn value_u64(value: &Value, key: &str) -> u64 {
     value.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
 
+fn value_f64(value: &Value, key: &str) -> f64 {
+    value.get(key).and_then(Value::as_f64).unwrap_or(0.0)
+}
+
 fn persist_and_emit(app: &AppHandle, inner: &Arc<RuntimeInner>) {
     if let Ok(state) = inner.app.lock() {
         let _ = save_app_state(app, &state);
@@ -890,6 +894,7 @@ fn ingest_event(app: &AppHandle, inner: &Arc<RuntimeInner>, value: &Value) {
             let input = value_u64(usage, "inputTokens");
             let output = value_u64(usage, "outputTokens");
             let cached = value_u64(usage, "cachedTokens");
+            let credit = value_f64(usage, "credit");
             if let Ok(mut state) = inner.app.lock() {
                 if let Some(log) = state
                     .logs
@@ -899,6 +904,7 @@ fn ingest_event(app: &AppHandle, inner: &Arc<RuntimeInner>, value: &Value) {
                     log.input_tokens = input;
                     log.output_tokens = output;
                     log.cache_hit = cached > 0;
+                    log.credit = credit;
                     if let Some(status) = value.get("status").and_then(Value::as_u64) {
                         log.status = status as u16;
                     }

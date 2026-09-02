@@ -78,6 +78,10 @@ var (
 	streamIdleTimeout      = 60 * time.Second
 	imageStreamOpenTimeout = 10 * time.Second
 	imageStreamIdleTimeout = 60 * time.Second
+	// visionAgenticStreamIdleTimeout covers the codebuddy vision sub-agent
+	// loop: up to several rounds of text-model + vision-model upstream calls
+	// (each 10-30s), so the relay idle watchdog does not trip mid-loop.
+	visionAgenticStreamIdleTimeout = 300 * time.Second
 )
 
 type accountModelRule struct {
