@@ -87,12 +87,13 @@ func (b *codebuddyStreamToolCallBuffer) HasToolCalls() bool {
 }
 
 // Consume processes a single SSE line (with a `data:` prefix). It accumulates
-// any tool_calls deltas and strips `delta.tool_calls` and
-// `delta.reasoning_content` from the returned line so they are not forwarded to
-// the client (which would append them and corrupt the arguments JSON). It also
-// captures id/model/created for the consolidated chunk and reports the chunk's
-// finish_reason (if any). Non-data lines, non-JSON payloads and `[DONE]` are
-// returned unchanged with an empty finish reason (zero impact on pure-text
+// any tool_calls deltas and strips `delta.tool_calls` from the returned line so
+// they are not forwarded to the client (which would append them and corrupt the
+// arguments JSON). `delta.reasoning_content` is intentionally preserved so
+// OpenAI-compatible clients (CodeBuddy IDE) can collapse thinking content. It
+// also captures id/model/created for the consolidated chunk and reports the
+// chunk's finish_reason (if any). Non-data lines, non-JSON payloads and `[DONE]`
+// are returned unchanged with an empty finish reason (zero impact on pure-text
 // streams).
 func (b *codebuddyStreamToolCallBuffer) Consume(line []byte) (stripped []byte, finishReason string) {
 	trimmed := bytes.TrimSpace(line)
@@ -149,13 +150,6 @@ func (b *codebuddyStreamToolCallBuffer) Consume(line []byte) (stripped []byte, f
 			// pure-text chunks are not re-serialized on every line.
 			if fc := delta.Get("function_call"); fc.Exists() && fc.Type != gjson.Null {
 				if next, err := sjson.DeleteBytes(out, fmt.Sprintf("choices.%d.delta.function_call", ci)); err == nil {
-					out = next
-					modified = true
-				}
-			}
-
-			if delta.Get("reasoning_content").Exists() {
-				if next, err := sjson.DeleteBytes(out, fmt.Sprintf("choices.%d.delta.reasoning_content", ci)); err == nil {
 					out = next
 					modified = true
 				}

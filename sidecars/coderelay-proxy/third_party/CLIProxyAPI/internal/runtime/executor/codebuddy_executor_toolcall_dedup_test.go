@@ -217,7 +217,7 @@ func TestStreamToolCallBuffer_ContentNullInConsolidatedChunk(t *testing.T) {
 	}
 }
 
-func TestStreamToolCallBuffer_StripsToolCallsAndReasoning(t *testing.T) {
+func TestStreamToolCallBuffer_StripsToolCallsPreservesReasoning(t *testing.T) {
 	buf := newCodebuddyStreamToolCallBuffer()
 	line := []byte(`data: {"id":"cmpl-1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"reasoning_content":"thinking...","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"shell","arguments":"{}"}}]},"finish_reason":null}]}`)
 	stripped, finish := buf.Consume(line)
@@ -228,8 +228,10 @@ func TestStreamToolCallBuffer_StripsToolCallsAndReasoning(t *testing.T) {
 	if gjson.GetBytes(stripped, "choices.0.delta.tool_calls").Exists() {
 		t.Fatalf("forwarded line still has tool_calls: %s", stripped)
 	}
-	if gjson.GetBytes(stripped, "choices.0.delta.reasoning_content").Exists() {
-		t.Fatalf("forwarded line still has reasoning_content: %s", stripped)
+	// reasoning_content must be preserved so OpenAI-compatible clients can
+	// collapse thinking content instead of mixing it into the answer.
+	if got := gjson.GetBytes(stripped, "choices.0.delta.reasoning_content").String(); got != "thinking..." {
+		t.Fatalf("forwarded line lost reasoning_content: got %q, want %q; line=%s", got, "thinking...", stripped)
 	}
 }
 
@@ -296,9 +298,6 @@ func TestStreamToolCallBuffer_StripsLegacyFunctionCall(t *testing.T) {
 	}
 	if gjson.GetBytes(stripped, "choices.0.delta.tool_calls").Exists() {
 		t.Fatalf("forwarded line still has tool_calls: %s", stripped)
-	}
-	if gjson.GetBytes(stripped, "choices.0.delta.reasoning_content").Exists() {
-		t.Fatalf("forwarded line still has reasoning_content: %s", stripped)
 	}
 }
 

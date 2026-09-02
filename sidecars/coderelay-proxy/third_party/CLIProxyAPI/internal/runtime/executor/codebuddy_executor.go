@@ -366,9 +366,10 @@ func (e *CodebuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			if !bytes.HasPrefix(trimmedLine, []byte("data:")) {
 				continue
 			}
-			// Buffer tool_calls and strip them (plus reasoning_content) from the
-			// forwarded delta so Cursor receives one consolidated tool_calls chunk
-			// instead of concatenating multiple complete argument snapshots.
+			// Buffer tool_calls and strip them from the forwarded delta so Cursor
+			// receives one consolidated tool_calls chunk instead of concatenating
+			// multiple complete argument snapshots. reasoning_content is kept so
+			// the client can collapse thinking content.
 			stripped, finishReason := tcBuf.Consume(trimmedLine)
 			if finishReason != "" {
 				if !emitToolCalls() {
