@@ -1,4 +1,5 @@
 export type PageId = 'overview' | 'service' | 'keys' | 'logs' | 'accounts' | 'models' | 'settings';
+export type ThemeMode = 'light' | 'dark' | 'system';
 export type ServiceScope = 'localhost' | 'lan';
 export type RoutingStrategy = 'auto' | 'random' | 'single_account' | 'quota_high_first' | 'custom';
 export type AccountStatus = 'available' | 'needs_auth' | 'cooling' | 'restricted' | 'disabled';

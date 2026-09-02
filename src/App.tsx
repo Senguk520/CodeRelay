@@ -4,13 +4,14 @@ import type { LucideIcon } from 'lucide-react';
 import {
   Activity, AlertTriangle, Ban, CalendarCheck, Check, ChevronDown, CircleHelp, Clipboard, Cloud,
   Copy, Database, Eye, EyeOff, FileJson, Flame, FolderOpen, Gauge, Gift, Globe2, KeyRound,
-  Layers3, LayoutDashboard, ListFilter, LockKeyhole, Menu, Minus, MoreHorizontal,
+  Layers3, LayoutDashboard, ListFilter, LockKeyhole, LogOut, Menu, Minus, MoreHorizontal,
   Network, Pause, Pencil, Play, Plus, RefreshCw, Search, Server, Settings2,
   ShieldCheck, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, Upload,
   Users, X, Zap,
 } from 'lucide-react';
-import type { Account, ApiKey, AppState, CheckinResponse, CheckinStatusResponse, ModelInfo, OAuthCompleteResponse, PageId, RequestLog, ServiceConfig } from './types';
+import type { Account, ApiKey, AppState, CheckinResponse, CheckinStatusResponse, ModelInfo, OAuthCompleteResponse, PageId, RequestLog, ServiceConfig, ThemeMode } from './types';
 import { defaultState } from './types';
+import { applyTheme } from './theme';
 import {
   cancelOAuth, checkinAccount, clearLogs, completeOAuth, getCheckinStatus, getState, listModels, openExternal,
   refreshAccountQuota, refreshAllQuotas, resetLocalState, saveAccounts,
@@ -248,13 +249,12 @@ export function App() {
           <IconButton label="最大化" onClick={() => { if (hasTauri()) void getCurrentWindow().toggleMaximize(); else notify('浏览器预览无法调整桌面窗口大小'); }}><Square size={13} /></IconButton>
           <IconButton label="关闭" danger onClick={() => setShowExitMenu(true)}><X size={15} /></IconButton>
         </div>
-        {showExitMenu && <div className="exit-popover"><strong>{state.running ? '反代服务正在运行' : '退出 CodeRelay'}</strong><p>{state.running ? '关闭前需要先停止反代服务。请选择最小化到托盘或继续退出。' : '确认退出当前应用？'}</p><div className="popover-actions"><button className="button ghost" onClick={() => setShowExitMenu(false)}>取消</button>{state.running && <button className="button ghost" onClick={() => { void minimizeWindow(); }}>最小化到托盘</button>}<button className="button danger-button" onClick={() => { void closeWindow(); }}>{state.running ? '停止并退出' : '退出'}</button></div></div>}
       </header>
       <div className="content-scroll"><div className="page-container">
         {page === 'overview' && <OverviewPage state={state} onNavigate={setPage} onRefresh={() => { void handleRefreshOverview(); }} refreshing={refreshing} />}
         {page === 'service' && <ServicePage state={state} onSave={(config) => void runAction(() => saveConfig(config), '服务配置已保存；服务运行时需重新启动后生效', 'save')} notify={notify} />}
         {page === 'keys' && <KeysPage state={state} onAdd={() => { setEditingKey(null); setShowKeyModal(true); }} onEdit={(key) => { setEditingKey(key); setShowKeyModal(true); }} onSave={(keys) => void runAction(() => saveKeys(keys), 'API Key 已更新', 'save')} notify={notify} />}
-        {page === 'logs' && <LogsPage state={state} onClear={() => void runAction(clearLogs, '请求日志已清理', 'save')} />}
+        {page === 'logs' && <LogsPage state={state} onClear={() => void runAction(clearLogs, '请求日志已清理', 'save')} notify={notify} />}
         {page === 'accounts' && <AccountsPage state={state} onAdd={() => { setAccountModalMode('browser'); setShowAccountModal(true); }} onImport={() => { setAccountModalMode('file'); setShowAccountModal(true); }} onSave={(accounts) => void runAction(() => saveAccounts(accounts), '账号列表已更新', 'save')} onRefresh={handleRefreshAccount} onRefreshAll={handleRefreshAll} onCheckin={() => setShowCheckinModal(true)} notify={notify} />}
         {page === 'models' && <ModelsPage state={state} notify={notify} />}
         {page === 'settings' && <SettingsPage onReset={resetLocalState} notify={notify} />}
@@ -266,6 +266,7 @@ export function App() {
     {showAccountModal && <AccountModal existingAccounts={state.accounts} initialMode={accountModalMode} onClose={() => setShowAccountModal(false)} onSave={(accounts, summary) => { setShowAccountModal(false); void runAction(() => { const ids = new Set(accounts.map((account) => account.id)); const emails = new Set(accounts.map((account) => account.email.trim().toLowerCase()).filter(Boolean)); const kept = state.accounts.filter((account) => !ids.has(account.id) && !emails.has(account.email.trim().toLowerCase())); return saveAccounts([...kept, ...accounts]); }, summary ?? `已添加 ${accounts.length} 个账号`, 'save'); }} notify={notify} />}
     {showKeyModal && <KeyModal accounts={state.accounts} existingKey={editingKey} onClose={() => { setShowKeyModal(false); setEditingKey(null); }} onSave={(key) => { setShowKeyModal(false); setEditingKey(null); if (editingKey) { void runAction(() => saveKeys(state.keys.map((item) => item.id === key.id ? key : item)), 'API Key 已更新', 'save'); } else { void runAction(() => saveKeys([...state.keys, key]), 'API Key 已创建', 'save'); } }} />}
     {showCheckinModal && <CheckinModal accounts={state.accounts} onClose={() => setShowCheckinModal(false)} />}
+    {showExitMenu && <Modal title={state.running ? '反代服务正在运行' : '退出 CodeRelay'} onClose={() => setShowExitMenu(false)}><div className="modal-form exit-confirm"><p className="exit-confirm-lead">{state.running ? '关闭前需要先停止反代服务。请选择最小化到系统盘或继续退出。' : '确认退出当前应用？'}</p><div className="exit-confirm-actions"><button className="button ghost" onClick={() => setShowExitMenu(false)}><X size={14} />取消</button><button className="button ghost" onClick={() => { void minimizeWindow(); }}><Minus size={14} />最小化到系统盘</button><button className="button danger-button" onClick={() => { void closeWindow(); }}><LogOut size={14} />{state.running ? '停止并退出' : '退出'}</button></div></div></Modal>}
   </div>;
 }
 
@@ -274,7 +275,7 @@ function OverviewPage({ state, onNavigate, onRefresh, refreshing }: { state: App
   const attention = state.accounts.filter((account) => account.status === 'needs_auth' || account.status === 'cooling').length;
   const cacheRate = state.stats.totalTokens ? Math.round((state.stats.cacheHitTokens / state.stats.totalTokens) * 100) : 0;
   return <>
-    <div className="page-intro"><div><div className="eyebrow">工作台 / 运行概览</div><h1>保持请求链路清晰。</h1><p>查看 CodeBuddy 账号池、本地 OpenAI 兼容服务和最近一次运行的关键状态。</p></div><div className="intro-actions"><button className="button ghost icon-only" onClick={onRefresh} disabled={refreshing} aria-label="刷新统计" title="刷新统计"><RefreshCw size={15} className={refreshing ? 'spin' : ''} /></button><button className="button ghost" onClick={() => onNavigate('accounts')}><Users size={15} />管理账号</button><button className="button ghost" onClick={() => onNavigate('service')}><Server size={15} />服务配置</button></div></div>
+    <div className="page-intro"><div><div className="eyebrow">工作台 / 运行概览</div><h1>保持请求链路清晰</h1><p>查看 CodeBuddy 账号池、本地 OpenAI 兼容服务和最近一次运行的关键状态。</p></div><div className="intro-actions"><button className="button ghost icon-only" onClick={onRefresh} disabled={refreshing} aria-label="刷新统计" title="刷新统计"><RefreshCw size={15} className={refreshing ? 'spin' : ''} /></button><button className="button ghost" onClick={() => onNavigate('accounts')}><Users size={15} />管理账号</button><button className="button ghost" onClick={() => onNavigate('service')}><Server size={15} />服务配置</button></div></div>
     <div className="overview-grid">
       <section className={`hero-status panel ${state.running ? 'running' : ''}`}><div className="panel-topline"><span className="panel-kicker"><Server size={14} />反代服务</span><StatusPill tone={state.running ? 'success' : 'muted'}>{state.running ? '运行中' : '已停止'}</StatusPill></div><div className="hero-value">{state.running ? '服务在线' : '等待手动启动'}</div><p>{state.running ? `正在监听 ${state.config.bindHost}:${state.actualPort ?? state.config.port}` : state.lastError ?? '服务启动后将通过本地 OpenAI 兼容接口接收请求。'}</p><div className="hero-foot"><div><span>可用账号</span><strong>{available} / {state.accounts.length}</strong></div><div><span>需要关注</span><strong>{attention}</strong></div><button className="inline-link" onClick={() => onNavigate('service')}>查看服务配置 <span>→</span></button></div></section>
       <section className="metric-card panel"><span className="metric-icon blue"><Activity size={17} /></span><span className="metric-label">总请求数</span><strong>{formatNumber(state.stats.requestCount)}</strong><span className="metric-trend"><small>来自本地请求日志</small></span></section>
@@ -319,7 +320,7 @@ function KeysPage({ state, onAdd, onEdit, onSave, notify }: { state: AppState; o
 }
 function Summary({ label, value, tone }: { label: string; value: string; tone?: 'success' }) { return <div className="summary-card"><span>{label}</span><strong className={tone}>{value}</strong></div>; }
 
-function LogsPage({ state, onClear }: { state: AppState; onClear: () => void }) {
+function LogsPage({ state, onClear, notify }: { state: AppState; onClear: () => void; notify: NoticeHandler }) {
   const [query, setQuery] = useState('');
   const [onlyErrors, setOnlyErrors] = useState(false);
   const [selected, setSelected] = useState<RequestLog | null>(null);
@@ -336,7 +337,43 @@ function LogsPage({ state, onClear }: { state: AppState; onClear: () => void }) 
     <div className="panel table-panel"><div className="table-toolbar"><div className="search-box"><Search size={15} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索模型、账号、Key 或路径" /></div><div className="toolbar-right"><button className={`filter-button ${onlyErrors ? 'active' : ''}`} onClick={() => setOnlyErrors(!onlyErrors)}><AlertTriangle size={14} />仅看错误</button><button className="filter-button" onClick={onClear}><Trash2 size={14} />清理日志</button></div></div>
       {logs.length ? <div className="data-table logs-table"><div className="table-head"><span>时间</span><span>模型 / 路径</span><span>账号</span><span>状态</span><span>耗时</span><span>Token</span><span /></div>{logs.map(renderLogRow)}</div> : <EmptyState icon={FileJson} title="没有匹配的请求" description="保留筛选条件，或清除筛选后查看最近 7 天的日志。" />}
     </div>
-    {selected && <Modal title="请求详情" onClose={() => setSelected(null)}><div className="modal-form"><div className="detail-list"><div><span>请求 ID</span><code>{selected.requestId}</code></div><div><span>模型</span><code>{selected.model || '—'}</code></div><div><span>路径</span><code>{selected.method} {selected.path}</code></div><div><span>API Key</span><code>{selected.apiKeyId || '—'}</code></div><div><span>状态</span><strong>{selected.status || '—'} · {selected.success ? '成功' : '失败'}</strong></div><div><span>错误信息</span><p>{selected.error ?? '无'}</p></div></div></div></Modal>}
+    {selected && (() => {
+      const account = state.accounts.find((item) => item.id === selected.accountId);
+      const showError = !selected.success && Boolean(selected.error);
+      return <Modal title="请求详情" onClose={() => setSelected(null)} wide>
+        <div className="detail-view">
+          <div className="detail-section">
+            <h4 className="detail-section-title">基本信息</h4>
+            <dl className="detail-list">
+              <div className="detail-row"><dt>请求 ID</dt><dd><code>{selected.requestId}</code></dd></div>
+              <div className="detail-row"><dt>时间</dt><dd><code>{formatDate(selected.timestamp)}</code></dd></div>
+              <div className="detail-row"><dt>状态</dt><dd><StatusPill tone={selected.success ? 'success' : 'danger'}>{selected.status || '—'} · {selected.success ? '成功' : '失败'}</StatusPill></dd></div>
+            </dl>
+          </div>
+          <div className="detail-section">
+            <h4 className="detail-section-title">请求信息</h4>
+            <dl className="detail-list">
+              <div className="detail-row"><dt>方法</dt><dd><code>{selected.method}</code></dd></div>
+              <div className="detail-row"><dt>路径</dt><dd><code>{selected.path}</code></dd></div>
+              <div className="detail-row"><dt>模型</dt><dd><code>{selected.model || '—'}</code></dd></div>
+              <div className="detail-row"><dt>API Key</dt><dd className="detail-row-copy"><code>{selected.apiKeyId || '—'}</code>{selected.apiKeyId && <IconButton label="复制 API Key ID" onClick={() => { void copyText(selected.apiKeyId!).then(() => notify('API Key ID 已复制')); }}><Copy size={14} /></IconButton>}</dd></div>
+              <div className="detail-row"><dt>账号</dt><dd><span>{account?.email ?? selected.accountId ?? '—'}</span></dd></div>
+            </dl>
+          </div>
+          <div className="detail-section">
+            <h4 className="detail-section-title">性能</h4>
+            <dl className="detail-list">
+              <div className="detail-row"><dt>耗时</dt><dd><code>{selected.latencyMs} ms</code></dd></div>
+              <div className="detail-row"><dt>输入 Token</dt><dd><code>{formatNumber(selected.inputTokens)}</code></dd></div>
+              <div className="detail-row"><dt>输出 Token</dt><dd><code>{formatNumber(selected.outputTokens)}</code></dd></div>
+              <div className="detail-row"><dt>Credit</dt><dd><code>{selected.credit.toFixed(2)}</code></dd></div>
+              <div className="detail-row"><dt>缓存命中</dt><dd>{selected.cacheHit ? <StatusPill tone="success">命中</StatusPill> : <StatusPill tone="muted">未命中</StatusPill>}</dd></div>
+            </dl>
+          </div>
+          {showError && <div className="detail-section"><h4 className="detail-section-title">错误信息</h4><div className="inline-error"><AlertTriangle size={15} /><span>{selected.error}</span></div></div>}
+        </div>
+      </Modal>;
+    })()}
   </>;
 }
 
@@ -506,10 +543,11 @@ function ModelsPage({ state, notify }: { state: AppState; notify: NoticeHandler 
 
 function SettingsPage({ onReset, notify }: { onReset: () => void; notify: NoticeHandler }) {
   const [tab, setTab] = useState<'general' | 'network' | 'data' | 'about'>('general');
-  const [prefs, setPrefs] = useState(() => { try { return JSON.parse(localStorage.getItem('coderelay-preferences') ?? '{}') as { openOverview?: boolean; refreshAccounts?: boolean; closeBehavior?: string; retention?: string }; } catch { return {}; } });
+  const [prefs, setPrefs] = useState(() => { try { return JSON.parse(localStorage.getItem('coderelay-preferences') ?? '{}') as { openOverview?: boolean; refreshAccounts?: boolean; closeBehavior?: string; retention?: string; theme?: ThemeMode }; } catch { return {}; } });
   const update = (changes: Partial<typeof prefs>) => setPrefs((current) => ({ ...current, ...changes }));
-  const save = () => { localStorage.setItem('coderelay-preferences', JSON.stringify(prefs)); notify('应用设置已保存'); };
-  return <><SectionHeader eyebrow="应用 / 偏好" title="设置" description="调整 CodeRelay 的桌面行为、数据保留和隐私选项。" action={<button className="button primary" onClick={save}><Check size={15} />保存设置</button>} /><div className="settings-layout"><div className="settings-tabs">{([['general', '常规', Settings2], ['network', '网络', Network], ['data', '数据与隐私', Database], ['about', '关于', CircleHelp]] as Array<[typeof tab, string, LucideIcon]>).map(([id, label, Icon]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}><Icon size={16} />{label}</button>)}</div><div className="panel settings-panel">{tab === 'general' && <><div className="settings-section"><h3>启动行为</h3><Toggle label="启动时打开总览" description="软件启动后默认显示总览页。" checked={prefs.openOverview ?? true} onChange={(value) => update({ openOverview: value })} /><Toggle label="启动时自动刷新账号额度" description="启动后读取最近保存的账号并刷新配额。" checked={prefs.refreshAccounts ?? false} onChange={(value) => update({ refreshAccounts: value })} /></div><div className="settings-section"><h3>关闭窗口</h3><Field label="服务运行时点击关闭" hint="此设置用于后续窗口关闭流程"><select value={prefs.closeBehavior ?? 'ask'} onChange={(e) => update({ closeBehavior: e.target.value })}><option value="ask">每次询问</option><option value="tray">最小化到系统托盘</option><option value="exit">停止服务后退出</option></select></Field></div></>}{tab === 'network' && <div className="settings-section"><h3>网络安全</h3><p className="settings-note"><ShieldCheck size={15} />默认监听 localhost。局域网入口需要在“服务配置”中单独开启，所有请求仍需有效 API Key。</p></div>}{tab === 'data' && <div className="settings-section"><h3>本地数据</h3><Field label="请求日志保留时间"><select value={prefs.retention ?? '7'} onChange={(e) => update({ retention: e.target.value })}><option value="7">最近 7 天</option><option value="30">最近 30 天</option></select></Field><div className="danger-zone"><div><h3>重置浏览器预览数据</h3><p>仅清理当前 Web 预览中的本地状态，不会删除桌面端凭据文件。</p></div><button className="button danger-button" onClick={onReset}><Trash2 size={15} />重置数据</button></div></div>}{tab === 'about' && <div className="about-block"><div className="about-logo">CR</div><h3>CodeRelay</h3><p>面向高级用户的 CodeBuddy CN 账号池和本地 OpenAI 兼容反代管理工具。</p><div className="about-meta"><span>版本 0.1.0</span><span>Windows 桌面端</span><span>本地优先</span></div><button className="inline-link" onClick={() => notify('第三方组件许可见项目根目录 NOTICE.md')}>查看第三方许可 <span>→</span></button></div>}</div></div></>;
+  const changeTheme = (theme: ThemeMode) => { update({ theme }); applyTheme(theme); };
+  const save = () => { localStorage.setItem('coderelay-preferences', JSON.stringify(prefs)); applyTheme(prefs.theme ?? 'system'); notify('应用设置已保存'); };
+  return <><SectionHeader eyebrow="应用 / 偏好" title="设置" description="调整 CodeRelay 的桌面行为、数据保留和隐私选项。" action={<button className="button primary" onClick={save}><Check size={15} />保存设置</button>} /><div className="settings-layout"><div className="settings-tabs">{([['general', '常规', Settings2], ['network', '网络', Network], ['data', '数据与隐私', Database], ['about', '关于', CircleHelp]] as Array<[typeof tab, string, LucideIcon]>).map(([id, label, Icon]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}><Icon size={16} />{label}</button>)}</div><div className="panel settings-panel">{tab === 'general' && <><div className="settings-section"><h3>启动行为</h3><Toggle label="启动时打开总览" description="软件启动后默认显示总览页。" checked={prefs.openOverview ?? true} onChange={(value) => update({ openOverview: value })} /><Toggle label="启动时自动刷新账号额度" description="启动后读取最近保存的账号并刷新配额。" checked={prefs.refreshAccounts ?? false} onChange={(value) => update({ refreshAccounts: value })} /></div><div className="settings-section"><h3>外观</h3><Field label="主题模式" hint="选择后立即预览，点击“保存设置”持久化。"><div className="segmented theme-segmented"><button className={(prefs.theme ?? 'system') === 'system' ? 'active' : ''} onClick={() => changeTheme('system')}>跟随系统</button><button className={(prefs.theme ?? 'system') === 'light' ? 'active' : ''} onClick={() => changeTheme('light')}>浅色</button><button className={(prefs.theme ?? 'system') === 'dark' ? 'active' : ''} onClick={() => changeTheme('dark')}>深色</button></div></Field></div><div className="settings-section"><h3>关闭窗口</h3><Field label="服务运行时点击关闭" hint="此设置用于后续窗口关闭流程"><select value={prefs.closeBehavior ?? 'ask'} onChange={(e) => update({ closeBehavior: e.target.value })}><option value="ask">每次询问</option><option value="tray">最小化到系统托盘</option><option value="exit">停止服务后退出</option></select></Field></div></>}{tab === 'network' && <div className="settings-section"><h3>网络安全</h3><p className="settings-note"><ShieldCheck size={15} />默认监听 localhost。局域网入口需要在“服务配置”中单独开启，所有请求仍需有效 API Key。</p></div>}{tab === 'data' && <div className="settings-section"><h3>本地数据</h3><Field label="请求日志保留时间"><select value={prefs.retention ?? '7'} onChange={(e) => update({ retention: e.target.value })}><option value="7">最近 7 天</option><option value="30">最近 30 天</option></select></Field><div className="danger-zone"><div><h3>重置浏览器预览数据</h3><p>仅清理当前 Web 预览中的本地状态，不会删除桌面端凭据文件。</p></div><button className="button danger-button" onClick={onReset}><Trash2 size={15} />重置数据</button></div></div>}{tab === 'about' && <div className="about-block"><div className="about-logo">CR</div><h3>CodeRelay</h3><p>面向高级用户的 CodeBuddy CN 账号池和本地 OpenAI 兼容反代管理工具。</p><div className="about-meta"><span>版本 0.1.0</span><span>Windows 桌面端</span><span>本地优先</span></div><button className="inline-link" onClick={() => notify('第三方组件许可见项目根目录 NOTICE.md')}>查看第三方许可 <span>→</span></button></div>}</div></div></>;
 }
 
 interface ParsedAccount {
