@@ -8,3 +8,6 @@ sidecars/coderelay-proxy/bin/*
 .env*
 .venv
 .codebuddy/
+
+# Go sidecar 编译产物
+sidecars/coderelay-proxy/*.exe
