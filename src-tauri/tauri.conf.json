@@ -1,32 +1,44 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "CodeRelay",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.coderelay.desktop",
   "build": {
-    "beforeDevCommand": "npm run build:sidecar && npm run dev",
+    "beforeDevCommand": "npm run sync-version && npm run build:sidecar && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build:sidecar && npm run build",
+    "beforeBuildCommand": "npm run sync-version && npm run build:sidecar && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{
-      "label": "main",
-      "title": "CodeRelay",
-      "width": 1200,
-      "height": 760,
-      "minWidth": 960,
-      "minHeight": 600,
-      "center": true,
-      "decorations": false,
-      "resizable": true
-    }],
-    "security": { "csp": null }
+    "windows": [
+      {
+        "label": "main",
+        "title": "CodeRelay",
+        "width": 1200,
+        "height": 760,
+        "minWidth": 960,
+        "minHeight": 600,
+        "center": true,
+        "decorations": false,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
   },
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.ico", "icons/icon.icns", "icons/icon.png", "icons/32x32.png", "icons/128x128.png"],
-    "externalBin": ["../sidecars/coderelay-proxy/bin/coderelay-proxy"]
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.icns",
+      "icons/icon.png",
+      "icons/32x32.png",
+      "icons/128x128.png"
+    ],
+    "externalBin": [
+      "../sidecars/coderelay-proxy/bin/coderelay-proxy"
+    ]
   }
 }
