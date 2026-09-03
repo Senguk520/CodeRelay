@@ -195,6 +195,17 @@ func main() {
 			"message": fmt.Sprintf("codebuddy models updated to %d entries (source=tencent-backend)", len(synced)),
 		})
 	}
+	// 服务启动后从 model 接口同步一次模型清单并覆盖本地缓存，使 /v1/models
+	// 反映完整模型目录（后端接口直接拉取，不做任何本地 app.asar 提取）。
+	// 异步执行，不阻塞 ready 事件与 HTTP 服务启动。
+	go func() {
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-ctx.Done():
+			return
+		}
+		hook.syncCodebuddy()
+	}()
 	emitter.emitStartupStage("start_http_server")
 
 	// Reuse the same coreManager so WS upgrades share OAuth pool, routing and

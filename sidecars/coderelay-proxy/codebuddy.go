@@ -1,13 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
 	"net/http"
-	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -211,9 +207,9 @@ func syncCodebuddyModelsFromBackend(auths []*coreauth.Auth, cachePath string) []
 		})
 	}
 
-	// 探测过滤已下线模型：清单里存在但推理路由已返回 11102 的模型（如
-	// glm-4.6v、kimi-k2-thinking）不应暴露给客户端。
-	models = probeCodebuddyModelAvailability(creds, models)
+	// 直接信任后端模型清单，不做逐模型推理探测：探测请求（无论参数形态）
+	// 在部分路由上会被整体拒绝并返回 11102，导致大量可用模型被误过滤。
+	// 模型是否真的可用以实际推理请求的结果为准，由请求日志与账号健康度呈现。
 
 	// 安装到 registry（去重、排序、变更检测、刷新通知）。
 	ids := internalregistry.InstallCodebuddyModels(models)
@@ -226,80 +222,6 @@ func syncCodebuddyModelsFromBackend(auths []*coreauth.Auth, cachePath string) []
 		}
 	}
 	return ids
-}
-
-// codebuddyAvailabilityProbeConcurrency caps the number of concurrent
-// availability probe requests issued during a model sync.
-const codebuddyAvailabilityProbeConcurrency = 5
-
-// probeCodebuddyModelAvailability filters out models that the backend lists but
-// whose inference route is already decommissioned (HTTP 400 with code 11102
-// "service info not found", e.g. glm-4.6v, kimi-k2-thinking). A minimal
-// 1-token chat request is issued per model; only a definitive 11102 marks a
-// model unavailable, while network errors and other business errors keep the
-// model so upstream flakiness does not thrash the catalog.
-func probeCodebuddyModelAvailability(creds codebuddyauth.Creds, models []*internalregistry.ModelInfo) []*internalregistry.ModelInfo {
-	if len(models) == 0 {
-		return models
-	}
-	out := make([]*internalregistry.ModelInfo, 0, len(models))
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, codebuddyAvailabilityProbeConcurrency)
-	for _, m := range models {
-		if m == nil {
-			continue
-		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(m *internalregistry.ModelInfo) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			if codebuddyModelAvailable(creds, m.ID) {
-				mu.Lock()
-				out = append(out, m)
-				mu.Unlock()
-			}
-		}(m)
-	}
-	wg.Wait()
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out
-}
-
-// codebuddyModelAvailable reports whether a model's inference route is live by
-// sending a minimal chat request. It returns true on HTTP 2xx, on network
-// errors, and on any business error other than 11102 (service info not found),
-// so that only definitively decommissioned models are filtered out.
-func codebuddyModelAvailable(creds codebuddyauth.Creds, modelID string) bool {
-	payload, err := json.Marshal(map[string]any{
-		"model":      modelID,
-		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
-		"max_tokens": 1,
-		"stream":     true,
-	})
-	if err != nil {
-		return true
-	}
-	req, err := http.NewRequest(http.MethodPost, creds.ResolveBaseURL()+codebuddyauth.ChatPath, bytes.NewReader(payload))
-	if err != nil {
-		return true
-	}
-	codebuddyauth.ApplyHeaders(req, creds)
-	req.Header.Set("Accept", "text/event-stream")
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return true
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return true
-	}
-	b, _ := io.ReadAll(resp.Body)
-	// 11102 = "service info not found" — the model's inference route is gone.
-	return !bytes.Contains(b, []byte("11102"))
 }
 
 // handleCodebuddySyncModels 立即触发一次 CodeBuddy 模型同步，刷新 manifest 与
