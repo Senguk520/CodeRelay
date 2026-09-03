@@ -2,9 +2,11 @@
 
 A **Windows desktop management tool** for power users: centrally manage CodeBuddy China account pools and run a local **OpenAI-compatible reverse proxy service**, letting clients such as Cursor and CodeBuddy IDE connect to multiple accounts through a single local address with policy-based load balancing, cooldown, and quota scheduling.
 
-![License](https://img.shields.io/badge/license-MIT-blue)
+![License](https://img.shields.io/badge/license-CC%20BY--NC%204.0-orange)
 ![Version](https://img.shields.io/badge/version-0.1.2-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey)
+
+**English** | [中文](./README.md)
 
 > Visual design follows a "macOS flavor, Windows behavior" philosophy: black/white/gray hierarchy with semantic status colors, sidebar navigation, custom frameless title bar, and a persistent bottom service status bar.
 
@@ -145,7 +147,7 @@ The reverse proxy sidecar is built on [CLIProxyAPI](https://github.com/) (MIT Li
 
 ## License
 
-This project is open-sourced under the [MIT License](./LICENSE).
+This project's own code is licensed under [CC BY-NC 4.0](./LICENSE) (Creative Commons Attribution-NonCommercial 4.0 International). **Commercial use is strictly prohibited** — only learning, research, and personal use are permitted. The third-party CLIProxyAPI component remains under its original MIT License.
 
 ---
 

@@ -13,9 +13,11 @@ separately from the upstream snapshot.
 
 ## CodeRelay application
 
-The application-specific code in this repository is distributed under the MIT
-License. No Cockpit application branding, metadata, screenshots, tokens, or
-local configuration files are included in the new application.
+The application-specific code in this repository is distributed under the
+Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)
+license. Commercial use is strictly prohibited. No Cockpit application
+branding, metadata, screenshots, tokens, or local configuration files are
+included in the new application.
 
-The full text of the MIT License applicable to this repository's own code is
-available in the root-level [LICENSE](./LICENSE) file.
+The full text of the CC BY-NC 4.0 license applicable to this repository's
+own code is available in the root-level [LICENSE](./LICENSE) file.

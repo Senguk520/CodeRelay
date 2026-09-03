@@ -2,9 +2,11 @@
 
 一个面向高级用户的 **Windows 桌面管理工具**：集中管理 CodeBuddy 中国站账号池，并运行一个本地 **OpenAI 兼容反代服务**，让 Cursor、CodeBuddy IDE 等客户端通过统一的本地地址接入多个账号，按策略做负载均衡、冷却与配额调度。
 
-![License](https://img.shields.io/badge/license-MIT-blue)
+![License](https://img.shields.io/badge/license-CC%20BY--NC%204.0-orange)
 ![Version](https://img.shields.io/badge/version-0.1.2-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey)
+
+[English](./README.en.md) | **中文**
 
 > 视觉上采用「macOS 风味、Windows 行为」：黑白灰层级 + 语义状态色，窄栏导航、自定义无边框标题栏、底部持久服务状态栏。
 
@@ -143,7 +145,7 @@ go test ./...
 
 ## 许可证
 
-本项目采用 [MIT License](./LICENSE) 开源。
+本项目自身代码采用 [CC BY-NC 4.0](./LICENSE)（知识共享 署名-非商业性使用 4.0 国际）许可证开源，**禁止任何形式的商业用途**，仅允许学习、研究和个人使用。第三方组件 CLIProxyAPI 仍保持其原始 MIT License 不变。
 
 ---
 
