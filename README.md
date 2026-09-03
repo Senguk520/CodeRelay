@@ -1,37 +1,152 @@
 # CodeRelay
 
-CodeRelay 是一个 Windows 桌面管理工具，用于管理 CodeBuddy 中国站账号池并运行本地 OpenAI 兼容反代服务。
+一个面向高级用户的 **Windows 桌面管理工具**：集中管理 CodeBuddy 中国站账号池，并运行一个本地 **OpenAI 兼容反代服务**，让 Cursor、CodeBuddy IDE 等客户端通过统一的本地地址接入多个账号，按策略做负载均衡、冷却与配额调度。
 
-## 当前状态
+![License](https://img.shields.io/badge/license-MIT-blue)
+![Version](https://img.shields.io/badge/version-0.1.2-blue)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey)
 
-- 前端：React + TypeScript + Vite
-- 桌面端：Tauri 2 + Rust
-- 反代：Go sidecar，使用嵌入的 CLIProxyAPI v7.2.140 和 CodeBuddy 补丁
-- 默认服务：`127.0.0.1:11435`
-- 默认启动行为：应用打开时服务保持停止，必须由用户手动启动
-- 凭据：账号元数据与 Token 分离保存，Token 不写入普通状态文件
+> 视觉上采用「macOS 风味、Windows 行为」：黑白灰层级 + 语义状态色，窄栏导航、自定义无边框标题栏、底部持久服务状态栏。
 
-## 开发命令
+---
+
+## 功能特性
+
+- **账号池管理**：支持 OAuth/网页登录、手动粘贴 Token、导入配置文件三种方式添加账号；账号健康状态、冷却、额度与绑定关系一目了然。
+- **每日签到**：单个账号签到或一键全部签到。
+- **API Key 管理**：`sk-*` 前缀，支持绑定账号范围、限制模型、别名与启用/禁用。
+- **模型管理**：从在线接口同步模型清单并本地缓存，支持别名与禁用。
+- **本地反代服务**：`127.0.0.1:11435`，手动启动/停止，支持多账号调度策略与会话亲和。
+- **请求统计与日志**：总请求数、Token、缓存命中率、Credit 消耗、按小时柱状图；日志保留最近 7 天，支持筛选与 JSON 导出。
+- **系统托盘与通知**：最小化到托盘、启动/停止反代、退出；启动失败/服务异常时发送 Windows 系统通知。
+
+---
+
+## 快速开始
+
+### 环境要求
+
+- Node.js ≥ 20（推荐 20+）
+- Rust / cargo ≥ 1.8x
+- Go ≥ 1.22
+- Tauri CLI（由 npm devDependency 提供，无需全局安装）
+
+### 开发模式
 
 ```powershell
 npm install
-npm run typecheck
-npm run build
-npm run build:sidecar
+npm run tauri:dev
+```
+
+### 生产打包
+
+```powershell
+npm run tauri:build
+```
+
+打包产物默认输出到 `F:\target\release\bundle\`（NSIS 安装包与 MSI）。
+
+> 注意：本项目的 Cargo 目标目录配置为 `F:\target`，而非默认的 `src-tauri/target`。
+
+---
+
+## 使用方法
+
+1. **添加账号**：进入「账号池」，通过浏览器认证、手动 Token 或配置文件导入添加 CodeBuddy 中国站账号。
+2. **创建 API Key**：在「API Key」页面创建一个以 `sk-` 开头的 Key，并绑定可用的账号范围。
+3. **启动服务**：在「服务配置」或底部状态栏手动启动反代服务（服务**不会**随软件启动自动运行）。
+4. **接入客户端**：把客户端指向 `http://127.0.0.1:11435`，用你创建的 API Key 认证即可。
+
+### 接入示例
+
+**OpenAI 兼容 base_url**：
+
+```
+http://127.0.0.1:11435/v1
+```
+
+**curl**：
+
+```bash
+curl http://127.0.0.1:11435/v1/chat/completions \
+  -H "Authorization: Bearer sk-xxxx" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"auto","messages":[{"role":"user","content":"你好"}]}'
+```
+
+---
+
+## 架构
+
+```
+┌──────────────────────────────────────────────┐
+│  前端  React 19 + TypeScript + Vite          │
+│        (zustand 状态管理 / lucide-react 图标) │
+└──────────────────┬───────────────────────────┘
+                   │ Tauri invoke / 事件
+┌──────────────────▼───────────────────────────┐
+│  桌面壳  Tauri 2 + Rust                       │
+│        (gateway.rs: sidecar 进程管理/状态机)   │
+└──────────────────┬───────────────────────────┘
+                   │ 拉起 sidecar + stdout 事件
+┌──────────────────▼───────────────────────────┐
+│  反代 sidecar  Go                             │
+│        (内嵌 CLIProxyAPI v7.2.140 + CodeBuddy │
+│         CN 补丁，监听 127.0.0.1:11435)         │
+└──────────────────────────────────────────────┘
+```
+
+**数据流**：Rust 把账号凭据写入临时 `auths/` 目录并生成 `config.json`/`manifest.json` → 拉起 sidecar → sidecar 通过 **stdout（JSON 行）** 发送结构化生命周期与请求事件 → Rust 解析并更新状态 → 通过事件通知前端刷新。
+
+---
+
+## 开发指南
+
+### 目录结构
+
+| 路径 | 职责 |
+|---|---|
+| `src/` | React 前端；`App.tsx` 承载主要页面；`services.ts` 封装 invoke/HTTP；`types.ts` 类型 |
+| `src-tauri/src/lib.rs` | Tauri 入口（插件、单实例、托盘、窗口） |
+| `src-tauri/src/gateway.rs` | 核心：sidecar 进程管理、状态机、事件解析、凭据热更新 |
+| `src-tauri/src/codebuddy_oauth.rs` | 账号 OAuth 认证、token/额度刷新、签到 |
+| `src-tauri/src/models.rs` | 请求日志/统计结构 |
+| `sidecars/coderelay-proxy/` | Go sidecar 主程序（relay 服务器、模型同步、账号池调度） |
+| `scripts/` | `build-sidecar.ps1`、`sync-version.mjs` |
+
+### 常用命令
+
+```powershell
+npm run typecheck          # 前端 TS 类型检查
+npm run build              # 前端生产构建
+npm run build:sidecar      # 按 Rust target triple 编译 Go sidecar
+npm run sync-version       # 把 package.json 版本同步到 tauri.conf.json/Cargo.toml
 cargo check --manifest-path src-tauri/Cargo.toml
+go build ./...             # 在 sidecars/coderelay-proxy 下
 go test ./...
 ```
 
-`npm run build:sidecar` 会根据 Rust target triple 生成
-`sidecars/coderelay-proxy/bin/coderelay-proxy-<target>.exe`。
+### 版本号约定
 
-## 账号和服务配置
+**单一版本源 = `package.json` 的 `version`**。升级版本只改这一个文件，再运行 `npm run sync-version`（或直接 `tauri:build`，其 beforeBuild 已包含）。前端通过 `APP_VERSION`（由 Vite 注入）展示版本号，不要硬编码。
 
-首次使用时，在“账号池”中通过浏览器认证、手动 Token 或配置文件导入添加 CodeBuddy 中国站账号，然后创建至少一个以 `sk-` 开头的 API Key，最后在“服务配置”中手动启动反代服务。
+---
 
-sidecar 由 Tauri 生成 `config.json`、`manifest.json` 和临时 `auths/` 目录。sidecar 仅通过标准输出发送结构化生命周期和请求事件，不输出 Token 内容。
+## 第三方组件与许可
 
-## 第三方组件
+本项目反代 sidecar 基于 [CLIProxyAPI](https://github.com/)（MIT License）构建。第三方组件的许可与归属信息见：
 
-CLIProxyAPI 的许可和归属信息见 `NOTICE.md` 以及
-`sidecars/coderelay-proxy/third_party/CLIProxyAPI/LICENSE`。
+- `NOTICE.md`
+- `sidecars/coderelay-proxy/third_party/CLIProxyAPI/LICENSE`
+
+---
+
+## 许可证
+
+本项目采用 [MIT License](./LICENSE) 开源。
+
+---
+
+## 免责声明
+
+CodeRelay 是独立的第三方工具，与腾讯、CodeBuddy 官方无关。请遵守 CodeBuddy 及相关上游服务的使用条款，仅将其用于合法、合规的学习与个人用途。账号凭据、Token 与 API Key 均只保存在本地，本项目不收集、不上传任何凭据。

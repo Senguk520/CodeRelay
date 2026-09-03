@@ -16,3 +16,6 @@ separately from the upstream snapshot.
 The application-specific code in this repository is distributed under the MIT
 License. No Cockpit application branding, metadata, screenshots, tokens, or
 local configuration files are included in the new application.
+
+The full text of the MIT License applicable to this repository's own code is
+available in the root-level [LICENSE](./LICENSE) file.

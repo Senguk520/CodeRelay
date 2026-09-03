@@ -11,3 +11,4 @@ sidecars/coderelay-proxy/bin/*
 
 # Go sidecar 编译产物
 sidecars/coderelay-proxy/*.exe
+CodeRelay-产品需求.md
