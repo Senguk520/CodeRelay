@@ -122,9 +122,22 @@ export async function listModels(port = 11435, apiKey?: string): Promise<ModelIn
   const response = await fetch(`http://127.0.0.1:${port}/v1/models`, {
     headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
   });
-  if (!response.ok) throw new Error(`模型同步失败：HTTP ${response.status}`);
+  if (!response.ok) throw new Error(`读取模型目录失败：HTTP ${response.status}`);
   const payload = await response.json() as { data?: ModelInfo[] };
   return payload.data ?? [];
+}
+
+// syncModels 通知 sidecar 立即从 CodeBuddy CN 后端重新拉取模型清单并覆盖
+// 本地缓存（POST /v1/coderelay/codebuddy/sync）。随后再调 listModels 读取
+// 更新后的 /v1/models 目录。
+export async function syncModels(port = 11435, apiKey?: string): Promise<number> {
+  const response = await fetch(`http://127.0.0.1:${port}/v1/coderelay/codebuddy/sync`, {
+    method: 'POST',
+    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+  });
+  if (!response.ok) throw new Error(`模型同步失败：HTTP ${response.status}`);
+  const payload = await response.json() as { count?: number };
+  return payload.count ?? 0;
 }
 
 function requireTauri(feature: string) {

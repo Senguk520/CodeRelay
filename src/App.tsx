@@ -14,7 +14,7 @@ import { defaultState } from './types';
 import { applyTheme } from './theme';
 import {
   cancelOAuth, checkinAccount, clearLogs, completeOAuth, getCheckinStatus, getState, listModels, openExternal,
-  refreshAccountQuota, refreshAllQuotas, resetLocalState, saveAccounts,
+  refreshAccountQuota, refreshAllQuotas, resetLocalState, saveAccounts, syncModels,
   saveConfig, saveKeys, startOAuth, startService, stopService, validateToken,
 } from './services';
 
@@ -222,7 +222,14 @@ export function App() {
     }
     await getCurrentWindow().close();
   };
-  const minimizeWindow = async () => {
+  // 最小化到 Windows 任务栏（标准最小化行为，任务栏仍显示窗口按钮）。
+  const minimizeToTaskbar = async () => {
+    setShowExitMenu(false);
+    if (hasTauri()) await getCurrentWindow().minimize();
+    else notify('浏览器预览无法最小化窗口');
+  };
+  // 隐藏到系统托盘（窗口从任务栏消失，仅托盘图标可见）。
+  const hideToTray = async () => {
     setShowExitMenu(false);
     if (hasTauri()) await getCurrentWindow().hide();
     else notify('浏览器预览无法最小化到托盘');
@@ -249,7 +256,7 @@ export function App() {
       <header className="titlebar" data-tauri-drag-region="true">
         <div className="titlebar-left"><Menu size={16} className="mobile-menu" /><span className="title-brand">CodeRelay</span><span className="title-separator">/</span><span className="title-current">{titlePath}</span></div>
         <div className="window-controls">
-          <IconButton label="最小化" onClick={() => { void minimizeWindow(); }}><Minus size={15} /></IconButton>
+          <IconButton label="最小化" onClick={() => { void minimizeToTaskbar(); }}><Minus size={15} /></IconButton>
           <IconButton label="最大化" onClick={() => { if (hasTauri()) void getCurrentWindow().toggleMaximize(); else notify('浏览器预览无法调整桌面窗口大小'); }}><Square size={13} /></IconButton>
           <IconButton label="关闭" danger onClick={() => setShowExitMenu(true)}><X size={15} /></IconButton>
         </div>
@@ -270,7 +277,7 @@ export function App() {
     {showAccountModal && <AccountModal existingAccounts={state.accounts} initialMode={accountModalMode} onClose={() => setShowAccountModal(false)} onSave={(accounts, summary) => { setShowAccountModal(false); void runAction(() => { const ids = new Set(accounts.map((account) => account.id)); const emails = new Set(accounts.map((account) => account.email.trim().toLowerCase()).filter(Boolean)); const kept = state.accounts.filter((account) => !ids.has(account.id) && !emails.has(account.email.trim().toLowerCase())); return saveAccounts([...kept, ...accounts]); }, summary ?? `已添加 ${accounts.length} 个账号`, 'save'); }} notify={notify} />}
     {showKeyModal && <KeyModal accounts={state.accounts} existingKey={editingKey} onClose={() => { setShowKeyModal(false); setEditingKey(null); }} onSave={(key) => { setShowKeyModal(false); setEditingKey(null); if (editingKey) { void runAction(() => saveKeys(state.keys.map((item) => item.id === key.id ? key : item)), 'API Key 已更新', 'save'); } else { void runAction(() => saveKeys([...state.keys, key]), 'API Key 已创建', 'save'); } }} />}
     {showCheckinModal && <CheckinModal accounts={state.accounts} onClose={() => setShowCheckinModal(false)} />}
-    {showExitMenu && <Modal title={state.running ? '反代服务正在运行' : '退出 CodeRelay'} onClose={() => setShowExitMenu(false)}><div className="modal-form exit-confirm"><p className="exit-confirm-lead">{state.running ? '关闭前需要先停止反代服务。请选择最小化到系统盘或继续退出。' : '确认退出当前应用？'}</p><div className="exit-confirm-actions"><button className="button ghost" onClick={() => setShowExitMenu(false)}><X size={14} />取消</button><button className="button ghost" onClick={() => { void minimizeWindow(); }}><Minus size={14} />最小化到系统盘</button><button className="button danger-button" onClick={() => { void closeWindow(); }}><LogOut size={14} />{state.running ? '停止并退出' : '退出'}</button></div></div></Modal>}
+    {showExitMenu && <Modal title={state.running ? '反代服务正在运行' : '退出 CodeRelay'} onClose={() => setShowExitMenu(false)}><div className="modal-form exit-confirm"><p className="exit-confirm-lead">{state.running ? '关闭前需要先停止反代服务。请选择最小化到系统盘或继续退出。' : '确认退出当前应用？'}</p><div className="exit-confirm-actions"><button className="button ghost" onClick={() => setShowExitMenu(false)}><X size={14} />取消</button><button className="button ghost" onClick={() => { void hideToTray(); }}><Minus size={14} />最小化到系统盘</button><button className="button danger-button" onClick={() => { void closeWindow(); }}><LogOut size={14} />{state.running ? '停止并退出' : '退出'}</button></div></div></Modal>}
   </div>;
 }
 
@@ -534,10 +541,14 @@ function ModelsPage({ state, notify }: { state: AppState; notify: NoticeHandler 
     if (!state.running) { notify('请先启动反代服务，再从 CodeBuddy CN 后端同步模型'); return; }
     setSyncing(true);
     try {
-      const next = await listModels(state.actualPort ?? state.config.port, enabledKey);
+      const port = state.actualPort ?? state.config.port;
+      // 先让 sidecar 从 CodeBuddy CN 后端重新拉取模型并覆盖本地缓存，
+      // 再读取更新后的 /v1/models 目录展示。
+      await syncModels(port, enabledKey);
+      const next = await listModels(port, enabledKey);
       setModels(next);
       setLastSync(Date.now());
-      notify(`已同步 ${next.length} 个模型`);
+      notify(`已从后端同步 ${next.length} 个模型`);
     } catch (reason) {
       notify(reason instanceof Error ? reason.message : String(reason));
     } finally { setSyncing(false); }
