@@ -167,6 +167,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .empty-inline { padding: 26px 12px; color: var(--subtle); font-size: 11px; text-align: center; }
 .inline-error { display: flex; align-items: center; gap: 8px; margin-bottom: 13px; padding: 10px 12px; border: 1px solid #f0d1cd; border-radius: 8px; color: #ae4b47; background: var(--red-soft); font-size: 11px; line-height: 1.5; }
 .inline-error svg { flex: 0 0 auto; }
+.table-head > span:first-child, .row-check { display: flex; align-items: center; justify-content: center; }
+.table-head input[type='checkbox'], .row-check input[type='checkbox'] { accent-color: #4c9b69; width: 14px; height: 14px; cursor: pointer; }
 .inline-error span { flex: 1; }
 .segmented { display: inline-flex; padding: 2px; border: 1px solid var(--line); border-radius: 7px; background: #f4f4f1; }
 .segmented button { min-height: 24px; padding: 0 10px; border: 0; border-radius: 5px; color: var(--muted); background: transparent; font-size: 10px; font-weight: 600; }

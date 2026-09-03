@@ -82,6 +82,7 @@ pub fn run() {
             gateway::save_service_config,
             gateway::save_accounts,
             gateway::save_api_keys,
+            gateway::export_accounts,
             gateway::clear_request_logs,
             gateway::refresh_account_quota,
             gateway::refresh_all_quotas,

@@ -192,6 +192,13 @@ export async function refreshAllQuotas(): Promise<RefreshAllResponse> {
   };
 }
 
+// exportAccounts 将指定账号（含凭据 token）导出为 JSON，弹出系统「另存为」
+// 对话框由用户选择保存位置。返回实际保存路径，用户取消时返回 null。
+export async function exportAccounts(accountIds: string[], defaultFileName: string): Promise<string | null> {
+  requireTauri('导出账号');
+  return invoke<string | null>('export_accounts', { accountIds, defaultFileName });
+}
+
 export async function getCheckinStatus(accountId: string): Promise<CheckinStatusResponse> {
   requireTauri('签到');
   return invoke<CheckinStatusResponse>('codebuddy_checkin_status', { accountId });
