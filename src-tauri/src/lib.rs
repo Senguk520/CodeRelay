@@ -61,6 +61,11 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 
 pub fn run() {
     let app = tauri::Builder::default()
+        // 单实例锁必须是第一个注册的插件：再次启动 CodeRelay 时不会新开窗口，
+        // 而是聚焦已有主窗口，避免多实例并发操作 sidecar 引发端口冲突与状态错乱。
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())

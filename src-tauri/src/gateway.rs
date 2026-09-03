@@ -1047,14 +1047,22 @@ fn spawn_exit_monitor(
 
 fn stop_process_only(inner: &Arc<RuntimeInner>) {
     inner.generation.fetch_add(1, Ordering::SeqCst);
-    let child = inner
+    let mut child = inner
         .child
         .lock()
         .map(|mut value| value.take())
         .unwrap_or(None);
-    if let Some(mut child) = child {
-        terminate_child_tree(&mut child);
-        let _ = child.wait();
+    if let Some(process) = child.as_mut() {
+        // 进程若已自行退出（如端口占用导致的启动失败），直接回收即可；
+        // 对已退出 PID 执行 taskkill /T /F，在该 PID 被系统复用给无关进程时
+        // 会误杀整棵进程树，可能拖垮整个系统（表现为全机卡顿）。
+        let exited = matches!(process.try_wait(), Ok(Some(_)));
+        if !exited {
+            terminate_child_tree(process);
+        }
+    }
+    if let Some(mut process) = child.take() {
+        let _ = process.wait();
     }
     if let Ok(mut events) = inner.events.lock() {
         events.pending.clear();
@@ -1064,9 +1072,11 @@ fn stop_process_only(inner: &Arc<RuntimeInner>) {
 #[cfg(target_os = "windows")]
 fn terminate_child_tree(child: &mut Child) {
     // taskkill /T /F 终止整个进程树，避免 sidecar 派生的子进程残留占用端口。
+    use std::os::windows::process::CommandExt;
     let pid = child.id();
     let _ = Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW：GUI 进程不闪现控制台
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1406,6 +1416,42 @@ async fn refresh_account_inner(app: &AppHandle, inner: &Arc<RuntimeInner>, accou
     }
 }
 
+// hot_update_credential_file 将指定账号的最新凭据重写进 sidecar 的 auths 目录。
+// sidecar 通过 fsnotify 监听该目录，文件变更会触发凭据热更新（Add/Modify），
+// 无需重启 sidecar，从而避免中断进行中的反代请求。
+fn hot_update_credential_file(
+    app: &AppHandle,
+    inner: &Arc<RuntimeInner>,
+    account_id: &str,
+) -> Result<(), String> {
+    let running = locked(&inner.app, "应用")?.running;
+    if !running {
+        // 服务未运行：无需写运行时文件，凭据已由 refresh_account_inner 持久化。
+        return Ok(());
+    }
+    let (account, credential) = {
+        let state = locked(&inner.app, "应用")?;
+        let Some(account) = state.accounts.iter().find(|a| a.id == account_id).cloned() else {
+            return Ok(());
+        };
+        let Some(credential) = locked(&inner.credentials, "凭据")?
+            .get(account_id)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        (account, credential)
+    };
+    if account.status == "disabled" || account.region != "cn" || credential.access_token.trim().is_empty() {
+        return Ok(());
+    }
+    let auths_dir = runtime_files(app)?.root.join("auths");
+    let path = auths_dir.join(auth_file_name(&account.id));
+    let data = serde_json::to_vec_pretty(&auth_json(&account, &credential))
+        .map_err(|error| format!("序列化账号 {} 的运行时凭据失败：{error}", account.email))?;
+    atomic_write(&path, &data)
+}
+
 #[tauri::command]
 pub async fn refresh_account_quota(
     app: AppHandle,
@@ -1413,11 +1459,15 @@ pub async fn refresh_account_quota(
     account_id: String,
 ) -> Result<AppState, String> {
     let token_changed = refresh_account_inner(&app, &runtime.inner, &account_id).await?;
-    let state = if token_changed {
-        restart_if_running(&app, &runtime.inner)?
-    } else {
-        locked(&runtime.inner.app, "应用")?.clone()
-    };
+    if token_changed {
+        // token 轮换：热更新凭据文件让 sidecar 无缝切换，不重启进程，避免
+        // 中断正在进行的反代请求。
+        if let Err(error) = hot_update_credential_file(&app, &runtime.inner, &account_id) {
+            notify_failure(&app, "更新账号凭据失败", &error);
+            return Err(error);
+        }
+    }
+    let state = locked(&runtime.inner.app, "应用")?.clone();
     let _ = app.emit(STATE_CHANGED_EVENT, ());
     Ok(state)
 }
@@ -1453,23 +1503,25 @@ pub async fn refresh_all_quotas(
     }
     let mut refreshed = 0_usize;
     let mut failed = 0_usize;
-    let mut any_token_changed = false;
     for id in &ids {
         match refresh_account_inner(&app, &runtime.inner, id).await {
             Ok(token_changed) => {
                 refreshed += 1;
-                any_token_changed |= token_changed;
+                if token_changed {
+                    // token 轮换：热更新凭据文件让 sidecar 无缝切换，不重启
+                    // 进程，避免中断正在进行的反代请求。
+                    if let Err(error) = hot_update_credential_file(&app, &runtime.inner, id) {
+                        notify_failure(&app, "更新账号凭据失败", &error);
+                        failed += 1;
+                    }
+                }
             }
             Err(_) => {
                 failed += 1;
             }
         }
     }
-    let state = if any_token_changed {
-        restart_if_running(&app, &runtime.inner)?
-    } else {
-        locked(&runtime.inner.app, "应用")?.clone()
-    };
+    let state = locked(&runtime.inner.app, "应用")?.clone();
     let _ = app.emit(STATE_CHANGED_EVENT, ());
     if refreshed == 0 {
         return Err(format!("全部 {} 个账号刷新失败，请检查网络连接或重新认证", ids.len()));
@@ -1589,14 +1641,34 @@ pub fn quit_from_tray(app: &AppHandle) {
 }
 
 #[tauri::command]
-pub fn start_service(app: AppHandle, runtime: State<'_, RuntimeState>) -> Result<AppState, String> {
-    let _lifecycle = locked(&runtime.inner.lifecycle, "服务生命周期")?;
-    start_service_locked(&app, &runtime.inner)
+pub async fn start_service(
+    app: AppHandle,
+    runtime: State<'_, RuntimeState>,
+) -> Result<AppState, String> {
+    // start_service_locked 会同步等待 sidecar ready（最长 15 秒）。Tauri 的
+    // 同步命令在主线程执行，直接阻塞会冻结窗口事件循环，且等待期间 sidecar
+    // 事件触发的 get_app_state 等命令全部排队，造成 UI 彻底假死。移到阻塞
+    // 线程池执行，主线程保持响应。
+    let inner = runtime.inner.clone();
+    drop(runtime);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _lifecycle = locked(&inner.lifecycle, "服务生命周期")?;
+        start_service_locked(&app, &inner)
+    })
+    .await
+    .map_err(|error| format!("启动任务执行失败：{error}"))?
 }
 
 #[tauri::command]
-pub fn stop_service(app: AppHandle, runtime: State<'_, RuntimeState>) -> Result<AppState, String> {
-    stop_service_inner(&app, &runtime.inner)
+pub async fn stop_service(
+    app: AppHandle,
+    runtime: State<'_, RuntimeState>,
+) -> Result<AppState, String> {
+    let inner = runtime.inner.clone();
+    drop(runtime);
+    tauri::async_runtime::spawn_blocking(move || stop_service_inner(&app, &inner))
+        .await
+        .map_err(|error| format!("停止任务执行失败：{error}"))?
 }
 
 pub fn shutdown(app: &AppHandle, runtime: &RuntimeState) {
