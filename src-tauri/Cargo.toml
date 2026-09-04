@@ -4,7 +4,7 @@ version = "0.1.2"
 description = "CodeRelay desktop manager for CodeBuddy local proxy"
 authors = ["CodeRelay contributors"]
 edition = "2021"
-license = "CC-BY-NC-4.0"
+license = "MIT"
 
 [lib]
 name = "coderelay_lib"

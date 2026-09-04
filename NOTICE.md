@@ -14,10 +14,13 @@ separately from the upstream snapshot.
 ## CodeRelay application
 
 The application-specific code in this repository is distributed under the
-Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)
-license. Commercial use is strictly prohibited. No Cockpit application
-branding, metadata, screenshots, tokens, or local configuration files are
-included in the new application.
+MIT License with Commons Clause. The Commons Clause License Condition v1.0
+restricts the right to Sell the Software: you may use, copy, modify, merge,
+publish, and distribute it freely for non-commercial and internal purposes,
+but you may not provide it to third parties for a fee or other consideration.
 
-The full text of the CC BY-NC 4.0 license applicable to this repository's
-own code is available in the root-level [LICENSE](./LICENSE) file.
+No Cockpit application branding, metadata, screenshots, tokens, or local
+configuration files are included in the new application.
+
+The full text of the MIT License with Commons Clause applicable to this
+repository's own code is available in the root-level [LICENSE](./LICENSE) file.

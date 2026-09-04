@@ -2,7 +2,7 @@
 
 一个面向高级用户的 **Windows 桌面管理工具**：集中管理 CodeBuddy 中国站账号池，并运行一个本地 **OpenAI 兼容反代服务**，让 Cursor、CodeBuddy IDE 等客户端通过统一的本地地址接入多个账号，按策略做负载均衡、冷却与配额调度。
 
-![License](https://img.shields.io/badge/license-CC%20BY--NC%204.0-orange)
+![License](https://img.shields.io/badge/license-MIT%20with%20Commons%20Clause-blue)
 ![Version](https://img.shields.io/badge/version-0.1.2-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey)
 
@@ -21,6 +21,14 @@
 - **本地反代服务**：`127.0.0.1:11435`，手动启动/停止，支持多账号调度策略与会话亲和。
 - **请求统计与日志**：总请求数、Token、缓存命中率、Credit 消耗、按小时柱状图；日志保留最近 7 天，支持筛选与 JSON 导出。
 - **系统托盘与通知**：最小化到托盘、启动/停止反代、退出；启动失败/服务异常时发送 Windows 系统通知。
+
+---
+
+## 界面预览
+
+| 概览首页 | 服务配置 | API Key 管理 |
+|:---:|:---:|:---:|
+| ![概览首页](docs/image/home.png) | ![服务配置](docs/image/Service_configuration.png) | ![API Key 管理](docs/image/API_Key.png) |
 
 ---
 
@@ -145,7 +153,7 @@ go test ./...
 
 ## 许可证
 
-本项目自身代码采用 [CC BY-NC 4.0](./LICENSE)（知识共享 署名-非商业性使用 4.0 国际）许可证开源，**禁止任何形式的商业用途**，仅允许学习、研究和个人使用。第三方组件 CLIProxyAPI 仍保持其原始 MIT License 不变。
+本项目自身代码采用 [MIT License with Commons Clause](./LICENSE) 开源：在 MIT License 基础上附加 **Commons Clause License Condition v1.0**，即允许自由使用、复制、修改、合并、发布与分发，但**禁止将本软件以收费或其他对价形式提供给第三方**（禁止 Sell）。第三方组件 CLIProxyAPI 仍保持其原始 MIT License 不变。
 
 ---
 

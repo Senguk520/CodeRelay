@@ -2,7 +2,7 @@
 
 A **Windows desktop management tool** for power users: centrally manage CodeBuddy China account pools and run a local **OpenAI-compatible reverse proxy service**, letting clients such as Cursor and CodeBuddy IDE connect to multiple accounts through a single local address with policy-based load balancing, cooldown, and quota scheduling.
 
-![License](https://img.shields.io/badge/license-CC%20BY--NC%204.0-orange)
+![License](https://img.shields.io/badge/license-MIT%20with%20Commons%20Clause-blue)
 ![Version](https://img.shields.io/badge/version-0.1.2-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey)
 
@@ -21,6 +21,14 @@ A **Windows desktop management tool** for power users: centrally manage CodeBudd
 - **Local Reverse Proxy Service**: `127.0.0.1:11435`, manual start/stop, multi-account scheduling strategies with session affinity.
 - **Request Statistics & Logs**: Total requests, tokens, cache hit rate, credit consumption, hourly bar chart; logs retained for 7 days with filtering and JSON export.
 - **System Tray & Notifications**: Minimize to tray, start/stop proxy, quit; Windows system notifications on startup failure or service errors.
+
+---
+
+## Screenshots
+
+| Overview Home | Service Configuration | API Key Management |
+|:---:|:---:|:---:|
+| ![Overview Home](docs/image/home.png) | ![Service Configuration](docs/image/Service_configuration.png) | ![API Key Management](docs/image/API_Key.png) |
 
 ---
 
@@ -147,7 +155,7 @@ The reverse proxy sidecar is built on [CLIProxyAPI](https://github.com/) (MIT Li
 
 ## License
 
-This project's own code is licensed under [CC BY-NC 4.0](./LICENSE) (Creative Commons Attribution-NonCommercial 4.0 International). **Commercial use is strictly prohibited** — only learning, research, and personal use are permitted. The third-party CLIProxyAPI component remains under its original MIT License.
+This project's own code is licensed under the [MIT License with Commons Clause](./LICENSE): the MIT License with the additional **Commons Clause License Condition v1.0**, which permits free use, copying, modification, merging, publishing, and distribution, but prohibits **selling the software or providing it to third parties for a fee or other consideration**. The third-party CLIProxyAPI component remains under its original MIT License.
 
 ---
 
