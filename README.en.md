@@ -54,9 +54,9 @@ npm run tauri:dev
 npm run tauri:build
 ```
 
-Build artifacts are output to `F:\target\release\bundle\` (NSIS installer and MSI).
+Build artifacts (NSIS installer and MSI) are output to the Cargo target directory's `release/bundle/` subdirectory.
 
-> Note: This project's Cargo target directory is configured as `F:\target`, not the default `src-tauri/target`.
+> Note: This project's Cargo target directory is configured separately (via `CARGO_TARGET_DIR` or `.cargo/config`) rather than the default `src-tauri/target`; the exact location depends on your build environment.
 
 ---
 
@@ -144,11 +144,16 @@ go test ./...
 
 ---
 
+## Acknowledgments
+
+This project takes inspiration from the technology choices of [cockpit-tools](https://github.com/jlcodes99/cockpit-tools) and is built on many excellent open-source projects. See [ACKNOWLEDGMENTS.md](./ACKNOWLEDGMENTS.md) for the full upstream attribution and third-party dependency list.
+
 ## Third-Party Components & Licenses
 
-The reverse proxy sidecar is built on [CLIProxyAPI](https://github.com/) (MIT License). For third-party license and attribution information, see:
+The reverse proxy sidecar is built on [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (MIT License). For third-party license and attribution information, see:
 
-- `NOTICE.md`
+- [NOTICE.md](./NOTICE.md)
+- [ACKNOWLEDGMENTS.md](./ACKNOWLEDGMENTS.md)
 - `sidecars/coderelay-proxy/third_party/CLIProxyAPI/LICENSE`
 
 ---

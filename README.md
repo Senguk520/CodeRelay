@@ -54,9 +54,9 @@ npm run tauri:dev
 npm run tauri:build
 ```
 
-打包产物默认输出到 `F:\target\release\bundle\`（NSIS 安装包与 MSI）。
+打包产物（NSIS 安装包与 MSI）输出到 Cargo 目标目录的 `release/bundle/` 下。
 
-> 注意：本项目的 Cargo 目标目录配置为 `F:\target`，而非默认的 `src-tauri/target`。
+> 注意：本项目的 Cargo 目标目录通过 `CARGO_TARGET_DIR` 或 `.cargo/config` 单独配置，非默认的 `src-tauri/target`，具体位置以你的构建环境为准。
 
 ---
 
@@ -142,11 +142,16 @@ go test ./...
 
 ---
 
+## 致谢
+
+本项目参考了 [cockpit-tools](https://github.com/jlcodes99/cockpit-tools) 的技术选型，并基于众多优秀的开源项目构建。完整的上游致谢与第三方依赖归属清单见 [ACKNOWLEDGMENTS.md](./ACKNOWLEDGMENTS.md)。
+
 ## 第三方组件与许可
 
-本项目反代 sidecar 基于 [CLIProxyAPI](https://github.com/)（MIT License）构建。第三方组件的许可与归属信息见：
+本项目反代 sidecar 基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)（MIT License）构建。第三方组件的许可与归属信息见：
 
-- `NOTICE.md`
+- [NOTICE.md](./NOTICE.md)
+- [ACKNOWLEDGMENTS.md](./ACKNOWLEDGMENTS.md)
 - `sidecars/coderelay-proxy/third_party/CLIProxyAPI/LICENSE`
 
 ---
