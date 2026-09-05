@@ -315,6 +315,7 @@ type providerGatewaySpec struct {
 	SupportsVision     bool                                      `json:"supportsVision,omitempty"`
 	ModelCapabilities  map[string]providerGatewayModelCapability `json:"modelCapabilities,omitempty"`
 	VisionRoutingModel string                                    `json:"visionRoutingModel,omitempty"`
+	VisionModel        string                                    `json:"visionModel,omitempty"`
 }
 
 type providerGatewayModelCapability struct {
@@ -1916,8 +1917,9 @@ func providerGatewayCanonicalModel(gateway *providerGatewaySpec, model string) s
 }
 
 func providerGatewayModelSupportsVision(gateway *providerGatewaySpec, model string) bool {
+	// 默认放行图片输入：未显式声明图片能力时，不删图、不换占位符，base64 直接透传给第三方上游。
 	if gateway == nil {
-		return false
+		return true
 	}
 	key := strings.ToLower(strings.TrimSpace(model))
 	if key != "" && gateway.ModelCapabilities != nil {
@@ -1925,7 +1927,7 @@ func providerGatewayModelSupportsVision(gateway *providerGatewaySpec, model stri
 			return capability.SupportsVision
 		}
 	}
-	return gateway.SupportsVision
+	return true
 }
 
 func providerGatewayModelCapabilityOverridesVision(gateway *providerGatewaySpec, model string) (bool, bool) {

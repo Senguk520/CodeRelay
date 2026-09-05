@@ -533,7 +533,7 @@ func TestRelayServerProviderGatewayUsesSelectedUpstreamModel(t *testing.T) {
 	}
 }
 
-func TestRelayServerProviderGatewayOmitsVisionInputWhenUnsupported(t *testing.T) {
+func TestRelayServerProviderGatewayPassesThroughImageInputByDefault(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	var upstreamBody string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -575,20 +575,20 @@ func TestRelayServerProviderGatewayOmitsVisionInputWhenUnsupported(t *testing.T)
 		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
 	}
 	if upstreamBody == "" {
-		t.Fatal("text-only fallback should call upstream")
+		t.Fatal("image request should call upstream")
 	}
-	if strings.Contains(upstreamBody, "image_url") || strings.Contains(upstreamBody, "data:image") {
-		t.Fatalf("text-only fallback should omit image data: %s", upstreamBody)
+	if !strings.Contains(upstreamBody, "image_url") || !strings.Contains(upstreamBody, "data:image") {
+		t.Fatalf("image input should be passed through by default: %s", upstreamBody)
 	}
-	if !strings.Contains(upstreamBody, providerGatewayOmittedImageText) {
-		t.Fatalf("text-only fallback should explain the omitted image: %s", upstreamBody)
+	if strings.Contains(upstreamBody, providerGatewayOmittedImageText) {
+		t.Fatalf("image input must not be replaced by a placeholder: %s", upstreamBody)
 	}
 	if !strings.Contains(upstreamBody, `"model":"deepseek-v4-flash"`) {
-		t.Fatalf("text-only fallback should keep the selected model: %s", upstreamBody)
+		t.Fatalf("request should keep the selected model: %s", upstreamBody)
 	}
 }
 
-func TestRelayServerProviderGatewayRoutesVisionInputToConfiguredModel(t *testing.T) {
+func TestRelayServerProviderGatewayKeepsImageInputWithConfiguredModel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	var upstreamPath string
 	var upstreamBody string
@@ -638,15 +638,15 @@ func TestRelayServerProviderGatewayRoutesVisionInputToConfiguredModel(t *testing
 	if upstreamPath != "/v1/chat/completions" {
 		t.Fatalf("unexpected upstream path: %s", upstreamPath)
 	}
-	if !strings.Contains(upstreamBody, `"model":"mimo-v2.5"`) || strings.Contains(upstreamBody, `"model":"mimo-v2.5-pro"`) {
-		t.Fatalf("vision request should be routed to configured model: %s", upstreamBody)
+	if !strings.Contains(upstreamBody, `"model":"mimo-v2.5-pro"`) || strings.Contains(upstreamBody, `"model":"mimo-v2.5"`) {
+		t.Fatalf("image request should keep the selected model, not be routed: %s", upstreamBody)
 	}
 	if !strings.Contains(upstreamBody, "image_url") {
-		t.Fatalf("vision request should keep image input: %s", upstreamBody)
+		t.Fatalf("image input should be passed through: %s", upstreamBody)
 	}
 }
 
-func TestRelayServerProviderGatewayRoutesVisionInputToOnlyVisionModel(t *testing.T) {
+func TestRelayServerProviderGatewayKeepsImageInputWithOnlyVisionModel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	var upstreamBody string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -690,8 +690,8 @@ func TestRelayServerProviderGatewayRoutesVisionInputToOnlyVisionModel(t *testing
 	if w.Code != http.StatusOK {
 		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(upstreamBody, `"model":"mimo-v2.5"`) || strings.Contains(upstreamBody, `"model":"mimo-v2.5-pro"`) {
-		t.Fatalf("single vision model should be used automatically: %s", upstreamBody)
+	if !strings.Contains(upstreamBody, `"model":"mimo-v2.5-pro"`) || strings.Contains(upstreamBody, `"model":"mimo-v2.5"`) {
+		t.Fatalf("image request should keep the selected model, not be routed: %s", upstreamBody)
 	}
 }
 
@@ -2026,6 +2026,138 @@ func TestCoreAuthSelectorFiltersNewModelExclusionsBeforeSessionAffinity(t *testi
 	}
 	if second == nil || second.ID != pro.ID {
 		t.Fatalf("Pick after exclusion = %#v, want %q", second, pro.ID)
+	}
+}
+
+func TestProviderGatewayExtractImagesChatCompletions(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{
+		"model":"deepseek-v4-pro",
+		"messages":[
+			{"role":"system","content":"you are helpful"},
+			{"role":"user","content":[
+				{"type":"text","text":"what is in this image?"},
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}
+			]}
+		]
+	}`)
+	images := providerGatewayExtractImages(body)
+	if len(images) != 1 {
+		t.Fatalf("expected 1 image, got %d", len(images))
+	}
+	if images[0].path != "messages.1.content.1" {
+		t.Fatalf("unexpected image path: %q", images[0].path)
+	}
+	if !strings.Contains(string(images[0].raw), "data:image/png") {
+		t.Fatalf("image raw should carry the base64 payload: %s", images[0].raw)
+	}
+}
+
+func TestProviderGatewayExtractImagesResponsesFormat(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{
+		"model":"deepseek-v4-pro",
+		"input":[
+			{"role":"user","content":[
+				{"type":"input_text","text":"describe"},
+				{"type":"input_image","image_url":"data:image/jpeg;base64,BBBB"}
+			]}
+		]
+	}`)
+	images := providerGatewayExtractImages(body)
+	if len(images) != 1 {
+		t.Fatalf("expected 1 image, got %d", len(images))
+	}
+	if images[0].path != "input.0.content.1" {
+		t.Fatalf("unexpected image path: %q", images[0].path)
+	}
+}
+
+func TestProviderGatewayExtractImagesNone(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"model":"deepseek-v4-pro","messages":[{"role":"user","content":"no image here"}]}`)
+	if images := providerGatewayExtractImages(body); len(images) != 0 {
+		t.Fatalf("expected 0 images, got %d", len(images))
+	}
+}
+
+func TestProviderGatewayUserQuestionChatCompletions(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{
+		"messages":[
+			{"role":"user","content":"first question"},
+			{"role":"assistant","content":"an answer"},
+			{"role":"user","content":[{"type":"text","text":"final question"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}
+		]
+	}`)
+	if got := providerGatewayUserQuestion(body); got != "final question" {
+		t.Fatalf("unexpected user question: %q", got)
+	}
+}
+
+func TestProviderGatewayUserQuestionResponsesFormat(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{
+		"input":[
+			{"role":"user","content":[{"type":"input_text","text":"line one"},{"type":"input_text","text":"line two"}]}
+		]
+	}`)
+	if got := providerGatewayUserQuestion(body); got != "line one\nline two" {
+		t.Fatalf("unexpected user question: %q", got)
+	}
+}
+
+func TestProviderGatewayReplaceImagesWithDescriptions(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{
+		"messages":[
+			{"role":"user","content":[
+				{"type":"text","text":"what is this?"},
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}},
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,BBBB"}}
+			]}
+		]
+	}`)
+	out, err := providerGatewayReplaceImagesWithDescriptions(body, []string{"a red apple", "a blue car"}, "text", "[Image omitted]")
+	if err != nil {
+		t.Fatalf("replace failed: %v", err)
+	}
+	if strings.Contains(string(out), "image_url") || strings.Contains(string(out), "base64") {
+		t.Fatalf("image parts should be replaced by text: %s", out)
+	}
+	if !strings.Contains(string(out), "a red apple") || !strings.Contains(string(out), "a blue car") {
+		t.Fatalf("descriptions should be backfilled: %s", out)
+	}
+	if !strings.Contains(string(out), "what is this?") {
+		t.Fatalf("text part should be preserved: %s", out)
+	}
+}
+
+func TestProviderGatewayReplaceImagesWithDescriptionsFallback(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"input":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`)
+	out, err := providerGatewayReplaceImagesWithDescriptions(body, []string{""}, "input_text", "[Image omitted]")
+	if err != nil {
+		t.Fatalf("replace failed: %v", err)
+	}
+	if !strings.Contains(string(out), "input_text") || !strings.Contains(string(out), "[Image omitted]") {
+		t.Fatalf("empty description should fall back to placeholder: %s", out)
+	}
+}
+
+func TestProviderGatewayVisionBackfillEnabled(t *testing.T) {
+	t.Parallel()
+	if providerGatewayVisionBackfillEnabled(nil) {
+		t.Fatal("nil gateway should be disabled")
+	}
+	if providerGatewayVisionBackfillEnabled(&providerGatewaySpec{}) {
+		t.Fatal("empty VisionModel should be disabled")
+	}
+	if providerGatewayVisionBackfillEnabled(&providerGatewaySpec{VisionModel: "  "}) {
+		t.Fatal("whitespace VisionModel should be disabled")
+	}
+	if !providerGatewayVisionBackfillEnabled(&providerGatewaySpec{VisionModel: "qwen-vl-max"}) {
+		t.Fatal("non-empty VisionModel should be enabled")
 	}
 }
 

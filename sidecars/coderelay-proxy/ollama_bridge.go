@@ -425,10 +425,6 @@ func (s *relayServer) handleOllamaProviderGatewayChat(c *gin.Context, gateway *p
 		writeAPIError(c, http.StatusNotFound, fmt.Sprintf("model %s is not available for this provider gateway", model), "model_not_available")
 		return
 	}
-	if providerGatewayRequestHasVisionInput(body) && !providerGatewayModelSupportsVision(gateway, upstreamModel) {
-		writeAPIError(c, http.StatusBadRequest, fmt.Sprintf("model %s does not support image input", upstreamModel), "unsupported_image_input")
-		return
-	}
 	upstreamBody := rewriteProviderGatewayBodyModel(body, upstreamModel)
 	upstreamURL, err := providerGatewayURL(gateway.BaseURL, "/v1/chat/completions")
 	if err != nil {

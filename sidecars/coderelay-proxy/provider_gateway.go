@@ -109,50 +109,25 @@ func (s *relayServer) handleProviderGatewayRequest(c *gin.Context, gateway *prov
 		writeAPIError(c, http.StatusNotFound, fmt.Sprintf("model %s is not available for this provider gateway", model), "model_not_available")
 		return
 	}
-	supportsVision := providerGatewayModelSupportsVision(gateway, upstreamModel)
-	if wireAPI == "chat_completions" {
-		if modelSupportsVision, ok := providerGatewayModelCapabilityOverridesVision(gateway, upstreamModel); ok {
-			supportsVision = modelSupportsVision
-		}
-	}
-	if providerGatewayRequestHasVisionInput(body) && !supportsVision {
-		visionRoutingModel := providerGatewayVisionRoutingModel(gateway)
-		if strings.TrimSpace(visionRoutingModel) == "" {
-			omittedBody, omittedCount, err := omitProviderGatewayVisionInput(body, sourceFormat)
-			if err != nil || omittedCount == 0 {
-				writeAPIError(c, http.StatusBadRequest, fmt.Sprintf("model %s does not support image input", upstreamModel), "unsupported_image_input")
-				return
-			}
-			body = omittedBody
+	if providerGatewayVisionBackfillEnabled(gateway) && providerGatewayRequestHasVisionInput(body) {
+		if ok, backfilled := s.providerGatewayDescribeAndBackfill(c, gateway, body, sourceFormat); ok {
+			body = backfilled
 			if s.emitter != nil {
 				s.emitter.emit(requestDiagnosticPayload{
-					Type:         "provider_gateway_vision_omitted",
+					Type:         "provider_gateway_vision_preprocessed",
 					RequestID:    internallogging.GetRequestID(c.Request.Context()),
 					Method:       c.Request.Method,
 					Path:         requestPath(c.Request),
 					RequestKind:  requestKindFromPath(requestPath(c.Request)),
 					Model:        upstreamModel,
 					Transport:    diagnosticTransport(c.Request),
-					ErrorMessage: fmt.Sprintf("omitted %d image input item(s) for text-only model", omittedCount),
-				})
-			}
-		} else {
-			originalModel := upstreamModel
-			upstreamModel = visionRoutingModel
-			if s.emitter != nil {
-				s.emitter.emit(requestDiagnosticPayload{
-					Type:         "provider_gateway_vision_routed",
-					RequestID:    internallogging.GetRequestID(c.Request.Context()),
-					Method:       c.Request.Method,
-					Path:         requestPath(c.Request),
-					RequestKind:  requestKindFromPath(requestPath(c.Request)),
-					Model:        upstreamModel,
-					Transport:    diagnosticTransport(c.Request),
-					ErrorMessage: fmt.Sprintf("routed image input from %s to %s", originalModel, upstreamModel),
+					ErrorMessage: fmt.Sprintf("preprocessed image input for %s via %s", upstreamModel, strings.TrimSpace(gateway.VisionModel)),
 				})
 			}
 		}
 	}
+	// 反代默认直通图片输入：不再依据 supportsVision 判断删图或路由，
+	// base64 图片内容原样透传给第三方上游。
 	upstreamPath := "/v1/responses"
 	upstreamBody := rewriteProviderGatewayBodyModel(body, upstreamModel)
 	if wireAPI == "chat_completions" {

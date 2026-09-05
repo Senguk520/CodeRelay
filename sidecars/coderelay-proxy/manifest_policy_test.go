@@ -708,11 +708,12 @@ func TestCodexClientModelsResponseGatesProviderGatewayImageInput(t *testing.T) {
 		supportsImage bool
 	}{
 		{
-			name: "text only",
+			name: "text only defaults to image capable",
 			gateway: &providerGatewaySpec{
 				UpstreamModels: []string{"deepseek-v4-pro"},
 			},
-			model: "deepseek-v4-pro",
+			model:         "deepseek-v4-pro",
+			supportsImage: true,
 		},
 		{
 			name: "model supports vision",
