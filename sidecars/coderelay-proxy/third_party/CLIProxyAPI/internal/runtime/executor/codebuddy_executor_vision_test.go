@@ -18,13 +18,15 @@ func TestCodebuddyChatHasImageInput(t *testing.T) {
 		want bool
 	}{
 		{
+			// payload 必须超过 codebuddyImageStubMaxPayloadChars(512)，
+			// 否则会被 codebuddyImagePartIsStub 判定为截断残片（stub）。
 			name: "image_url part detected",
-			in:   `{"messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}]}`,
+			in:   `{"messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"data:image/png;base64,` + strings.Repeat("A", 600) + `"}}]}]}`,
 			want: true,
 		},
 		{
 			name: "input_image part detected",
-			in:   `{"messages":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,BBBB"}]}]}`,
+			in:   `{"messages":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,` + strings.Repeat("B", 600) + `"}]}]}`,
 			want: true,
 		},
 		{
@@ -54,12 +56,12 @@ func TestCodebuddyChatHasImageInput(t *testing.T) {
 		},
 		{
 			name: "image in last user message detected despite text history",
-			in:   `{"messages":[{"role":"user","content":[{"type":"text","text":"之前"}]},{"role":"assistant","content":"ok"},{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}]}`,
+			in:   `{"messages":[{"role":"user","content":[{"type":"text","text":"之前"}]},{"role":"assistant","content":"ok"},{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,` + strings.Repeat("A", 600) + `"}}]}]}`,
 			want: true,
 		},
 		{
 			name: "image in tool message detected (Read tool result)",
-			in:   `{"messages":[{"role":"user","content":[{"type":"text","text":"读一下这张图"}]},{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{\"file_path\":\"a.png\"}"}}]},{"role":"tool","tool_call_id":"call_1","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}]}`,
+			in:   `{"messages":[{"role":"user","content":[{"type":"text","text":"读一下这张图"}]},{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{\"file_path\":\"a.png\"}"}}]},{"role":"tool","tool_call_id":"call_1","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,` + strings.Repeat("A", 600) + `"}}]}]}`,
 			want: true,
 		},
 		{
@@ -553,5 +555,128 @@ func TestCodebuddyBodyMentionsReadTool(t *testing.T) {
 				t.Fatalf("codebuddyBodyMentionsReadTool() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// --- historical image rewrite ----------------------------------------------
+
+func TestReplaceCodebuddyHistoricalImagesWithText(t *testing.T) {
+	marker := "[历史图片]"
+	tests := []struct {
+		name string
+		in   string
+		want func(t *testing.T, out string)
+	}{
+		{
+			name: "historical stub replaced, current-turn image kept",
+			in: `{"messages":[` +
+				`{"role":"user","content":[{"type":"text","text":"turn1"},{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,/9j/4AAQSkZJRgABA"}}]},` +
+				`{"role":"assistant","content":"描述..."},` +
+				`{"role":"user","content":[{"type":"text","text":"turn2"},{"type":"image_url","image_url":{"url":"data:image/png;base64,REALIMAGE"}}]}]}`,
+			want: func(t *testing.T, out string) {
+				t.Helper()
+				first := gjson.Get(out, "messages.0.content.1")
+				if first.Get("type").String() != "text" || first.Get("text").String() != marker {
+					t.Fatalf("historical image should become text marker, got %s", first.Raw)
+				}
+				current := gjson.Get(out, "messages.2.content.1")
+				if current.Get("type").String() != "image_url" {
+					t.Fatalf("current-turn image must stay untouched, got %s", current.Raw)
+				}
+			},
+		},
+		{
+			name: "text-only follow-up: stub replaced so model relies on description",
+			in: `{"messages":[` +
+				`{"role":"user","content":[{"type":"text","text":"turn1"},{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,/9j/4AAQSkZJRgABA"}}]},` +
+				`{"role":"assistant","content":"这是一张猫的图片"},` +
+				`{"role":"user","content":"它是什么颜色?"}]}`,
+			want: func(t *testing.T, out string) {
+				t.Helper()
+				first := gjson.Get(out, "messages.0.content.1")
+				if first.Get("type").String() != "text" || first.Get("text").String() != marker {
+					t.Fatalf("historical stub should become text marker, got %s", first.Raw)
+				}
+				if gjson.Get(out, "messages.2.content").String() != "它是什么颜色?" {
+					t.Fatalf("text-only current turn must stay untouched")
+				}
+			},
+		},
+		{
+			name: "no historical messages: no-op",
+			in:   `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}]}`,
+			want: func(t *testing.T, out string) {
+				t.Helper()
+				if gjson.Get(out, "messages.0.content.0.type").String() != "image_url" {
+					t.Fatalf("single-turn image must stay untouched")
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := replaceCodebuddyHistoricalImagesWithText([]byte(tt.in), marker)
+			tt.want(t, string(out))
+		})
+	}
+}
+
+// --- stub (truncated image) handling ----------------------------------------
+
+const stubURL = "data:image/jpeg;base64,/9j/4AAQSkZJRgABA" // 40-char payload, the real-world 80-char stub
+
+func TestCodebuddyImagePartIsStub(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"80-char truncated stub", `{"type":"image_url","image_url":{"url":"` + stubURL + `"}}`, true},
+		{"real data url", `{"type":"image_url","image_url":{"url":"data:image/png;base64,` + string(make([]byte, 600)) + `"}}`, false},
+		{"remote url is never stub", `{"type":"image_url","image_url":{"url":"https://example.com/a.png"}}`, false},
+		{"empty url", `{"type":"image_url","image_url":{"url":""}}`, true},
+		{"input_image stub form", `{"type":"input_image","image_url":"` + stubURL + `"}`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := codebuddyImagePartIsStub([]byte(tt.raw)); got != tt.want {
+				t.Fatalf("codebuddyImagePartIsStub() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCodebuddyChatHasImageInputIgnoresStubs(t *testing.T) {
+	// Tool-continuation turn: user message carries a truncated stub, followed by
+	// tool results. Must NOT count as image input (no vision call on stubs).
+	body := `{"messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"描述"},{"type":"image_url","image_url":{"url":"` + stubURL + `"}}]},` +
+		`{"role":"assistant","tool_calls":[{"id":"c1","function":{"name":"read_file","arguments":"{\"path\":\"h:////home.png/"}"}}]},` +
+		`{"role":"tool","tool_call_id":"c1","content":"Read image file: h://home.png"}]}`
+	if codebuddyChatHasImageInput([]byte(body)) {
+		t.Fatal("truncated stub must not count as image input")
+	}
+	if len(extractCodebuddyCurrentImages([]byte(body))) != 0 {
+		t.Fatal("extractCodebuddyCurrentImages must skip stubs")
+	}
+}
+
+func TestReplaceCodebuddyCurrentTurnStubsWithText(t *testing.T) {
+	marker := "[历史图片]"
+	realImg := "data:image/png;base64," + string(make([]byte, 600))
+	body := `{"messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"再看这张"},{"type":"image_url","image_url":{"url":"` + stubURL + `"}},{"type":"image_url","image_url":{"url":"` + realImg + `"}}]}]}`
+	out := string(replaceCodebuddyCurrentTurnStubsWithText([]byte(body), marker))
+	if gjson.Get(out, "messages.0.content.1.type").String() != "text" || gjson.Get(out, "messages.0.content.1.text").String() != marker {
+		t.Fatalf("stub should become marker text, got %s", gjson.Get(out, "messages.0.content.1").Raw)
+	}
+	if gjson.Get(out, "messages.0.content.2.type").String() != "image_url" {
+		t.Fatalf("real image must stay untouched, got %s", gjson.Get(out, "messages.0.content.2.type").String())
+	}
+}
+
+func TestCursorReadFileV2PlaceholderRecognized(t *testing.T) {
+	if !isCodebuddyImagePlaceholder("Read image file: h://Ai 自测空间文档\\home.png") {
+		t.Fatal("Cursor Read File V2 confirmation must be recognized as an image placeholder")
 	}
 }

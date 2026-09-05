@@ -102,6 +102,10 @@ func (e *CodebuddyExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	// the image from the tool_calls filePath so the vision router recognizes it.
 	body = codebuddyBackfillReadToolImages(body)
 
+	// Historical image rewrite: replace truncated historical image stubs with a
+	// text marker so text-only models do not choke on them (preprocess/routing).
+	body = e.rewriteCodebuddyHistoricalImagesForTextModel(body, baseModel)
+
 	// Vision proxy: transparently handle image input for non-vision models.
 	body, _ = e.applyCodebuddyVisionProxy(ctx, auth, body, baseModel, nil, reporter)
 
@@ -249,6 +253,10 @@ func (e *CodebuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	// the image from the tool_calls filePath so the vision router recognizes it.
 	body = codebuddyBackfillReadToolImages(body)
 
+	// Historical image rewrite: replace truncated historical image stubs with a
+	// text marker so text-only models do not choke on them (preprocess/routing).
+	body = e.rewriteCodebuddyHistoricalImagesForTextModel(body, baseModel)
+
 	// Vision proxy: transparently handle image input for non-vision models.
 	// Routing is applied synchronously (cheap model swap). Preprocess is deferred
 	// into the stream goroutine below so the vision description can be forwarded
@@ -293,12 +301,13 @@ func (e *CodebuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 
-	// Normalize tool-related message fields so the strict backend does not
-	// reject tool-calling rounds with 400 invalid_parameter_value.
-	body, err = normalizeCodebuddyToolMessages(body)
-	if err != nil {
-		return nil, err
-	}
+	// NOTE: normalizeCodebuddyToolMessages is intentionally NOT called here.
+	// It appends a synthetic user message when the body ends with a tool
+	// message, which would shift lastCodebuddyUserMessageIndex and break the
+	// deferred streaming preprocess below (image extraction and the
+	// description replacement both key off the last user message). It runs
+	// inside the stream goroutine, after the images have been swapped for
+	// their descriptions.
 
 	// Clamp oversized max_tokens (Cursor sends 65536) to the model's declared
 	// MaxCompletionTokens ceiling so strict backend routes do not reject it.
@@ -365,6 +374,21 @@ func (e *CodebuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			// Separate the text-model stream translator state from the vision
 			// delta state so the client stream stays coherent.
 			param = nil
+		}
+
+		// Normalize tool-related message fields so the strict backend does not
+		// reject tool-calling rounds with 400 invalid_parameter_value. This must
+		// run AFTER the preprocess block above: it may append a synthetic user
+		// message when the body ends with a tool message, and doing so before
+		// the image extraction/replacement would shift the last-user-message
+		// boundary and hide the backfilled images from the vision call.
+		body, errNorm := normalizeCodebuddyToolMessages(body)
+		if errNorm != nil {
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errNorm}:
+			case <-ctx.Done():
+			}
+			return
 		}
 
 		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))

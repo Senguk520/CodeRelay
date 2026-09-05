@@ -141,10 +141,43 @@ type codebuddyImagePart struct {
 	raw  []byte // raw JSON of the image part ({"type":"image_url",...})
 }
 
+// codebuddyImageStubMaxPayloadChars is the threshold below which a data-URL
+// image part is considered a truncated stub rather than a real image. Clients
+// (CodeBuddy IDE, Cursor) truncate historical images to ~80-char stubs
+// (e.g. "data:image/jpeg;base64,/9j/4AAQSkZJRgABA") when re-sending
+// conversation history; such parts carry no usable pixels (~30 bytes).
+// Real images are essentially always > 1KB of base64 payload.
+const codebuddyImageStubMaxPayloadChars = 512
+
+// codebuddyImagePartIsStub reports whether an image part carries no usable
+// image data: a data: URL whose payload is shorter than the stub threshold,
+// or a part with no URL at all. Remote (http/https) URLs are never stubs.
+func codebuddyImagePartIsStub(raw []byte) bool {
+	url := gjson.GetBytes(raw, "image_url.url").String()
+	if url == "" {
+		// input_image / Anthropic-style forms carry the URL directly as a string.
+		if direct := gjson.GetBytes(raw, "image_url"); direct.Type == gjson.String {
+			url = direct.String()
+		}
+	}
+	if url == "" {
+		return true
+	}
+	if !strings.HasPrefix(url, "data:") {
+		return false
+	}
+	idx := strings.Index(url, ",")
+	if idx < 0 {
+		return true
+	}
+	return len(url)-idx-1 < codebuddyImageStubMaxPayloadChars
+}
+
 // extractCodebuddyCurrentImages walks the current turn (the last user message
-// and any subsequent assistant/tool messages) and returns every image part in
-// body order together with its replacement path. Historical images (before the
-// last user message) are ignored, matching codebuddyChatHasImageInput.
+// and any subsequent assistant/tool messages) and returns every REAL image part
+// in body order together with its replacement path. Historical images (before
+// the last user message) and truncated stubs are ignored, matching
+// codebuddyChatHasImageInput.
 func extractCodebuddyCurrentImages(body []byte) []codebuddyImagePart {
 	messages := gjson.GetBytes(body, "messages")
 	if !messages.IsArray() {
@@ -166,6 +199,9 @@ func extractCodebuddyCurrentImages(body []byte) []codebuddyImagePart {
 			if !isCodebuddyImagePartType(part.Get("type").String()) {
 				continue
 			}
+			if codebuddyImagePartIsStub([]byte(part.Raw)) {
+				continue
+			}
 			images = append(images, codebuddyImagePart{
 				path: fmt.Sprintf("messages.%d.content.%d", mi, ci),
 				raw:  append([]byte(nil), []byte(part.Raw)...),
@@ -175,12 +211,57 @@ func extractCodebuddyCurrentImages(body []byte) []codebuddyImagePart {
 	return images
 }
 
+// replaceCodebuddyCurrentTurnStubsWithText replaces truncated image stubs in
+// the current turn (the last user message onward) with a text marker. Real
+// image parts are left untouched (they are handled by preprocess/routing).
+// Stubs carry no usable pixels: if they were passed to the vision model the
+// call would fail and poison the request with the "omitted" placeholder; if
+// passed through to the text model they make it disavow earlier descriptions.
+func replaceCodebuddyCurrentTurnStubsWithText(body []byte, text string) []byte {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() {
+		return body
+	}
+	arr := messages.Array()
+	lastUserIdx := lastCodebuddyUserMessageIndex(arr)
+	if lastUserIdx < 0 {
+		return body
+	}
+
+	out := body
+	for mi := lastUserIdx; mi < len(arr); mi++ {
+		content := arr[mi].Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		for ci, part := range content.Array() {
+			if !isCodebuddyImagePartType(part.Get("type").String()) {
+				continue
+			}
+			if !codebuddyImagePartIsStub([]byte(part.Raw)) {
+				continue
+			}
+			path := fmt.Sprintf("messages.%d.content.%d", mi, ci)
+			replacement, err := json.Marshal(map[string]string{"type": "text", "text": text})
+			if err != nil {
+				return body
+			}
+			out, err = sjson.SetRawBytes(out, path, replacement)
+			if err != nil {
+				// Never corrupt the request on a path error; keep the original.
+				return body
+			}
+		}
+	}
+	return out
+}
+
 // codebuddyChatHasImageInput reports whether the OpenAI-style chat body carries
-// at least one image part (image_url or input_image) in the current turn — the
-// last user message and any subsequent assistant/tool messages. This covers both
-// direct image attachment (user message) and Read-tool image results (tool
-// message), while excluding earlier historical messages so a text-only follow-up
-// in the same session is not misclassified by a previous image.
+// at least one REAL image part (image_url or input_image with usable data) in
+// the current turn — the last user message and any subsequent assistant/tool
+// messages. Truncated historical stubs do not count: they carry no usable
+// pixels, so triggering a vision call on them would waste quota, fail, and
+// poison the request with the omitted-image placeholder.
 func codebuddyChatHasImageInput(body []byte) bool {
 	messages := gjson.GetBytes(body, "messages")
 	if !messages.IsArray() {
@@ -197,9 +278,13 @@ func codebuddyChatHasImageInput(body []byte) bool {
 			continue
 		}
 		for _, part := range content.Array() {
-			if isCodebuddyImagePartType(part.Get("type").String()) {
-				return true
+			if !isCodebuddyImagePartType(part.Get("type").String()) {
+				continue
 			}
+			if codebuddyImagePartIsStub([]byte(part.Raw)) {
+				continue
+			}
+			return true
 		}
 	}
 	return false
@@ -289,6 +374,84 @@ func replaceCodebuddyImagesWithDescriptions(body []byte, descriptions []string, 
 			}
 			idx++
 
+			path := fmt.Sprintf("messages.%d.content.%d", mi, ci)
+			replacement, err := json.Marshal(map[string]string{"type": "text", "text": text})
+			if err != nil {
+				return body
+			}
+			out, err = sjson.SetRawBytes(out, path, replacement)
+			if err != nil {
+				// Never corrupt the request on a path error; keep the original.
+				return body
+			}
+		}
+	}
+	return out
+}
+
+// rewriteCodebuddyHistoricalImagesForTextModel replaces image parts in
+// historical messages (everything before the current turn, i.e. before the last
+// user message) with a plain-text marker when the request is headed to a
+// text-only model under preprocess/routing mode.
+//
+// Rationale: clients truncate historical images to useless stubs (e.g. an
+// 80-char truncated data URL) when re-sending conversation history. In
+// preprocess/routing mode the current-turn images are described and replaced,
+// but historical image parts used to pass through untouched, so the text-only
+// upstream model received an unreadable stub and concluded "I cannot see the
+// image", disavowing the earlier assistant description. Native-vision models
+// and off/agentic modes are intentionally left untouched (agentic mode manages
+// historical images in its own loop).
+func (e *CodebuddyExecutor) rewriteCodebuddyHistoricalImagesForTextModel(body []byte, baseModel string) []byte {
+	visionCfg := e.cfg.CodebuddyVision
+	mode := visionCfg.NormalizedVisionMode()
+	if mode != config.CodebuddyVisionModePreprocess && mode != config.CodebuddyVisionModeRouting {
+		return body
+	}
+	currentModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	if currentModel == "" {
+		currentModel = strings.TrimSpace(baseModel)
+	}
+	// The vision engine itself and native-vision models keep history intact.
+	if strings.EqualFold(currentModel, strings.TrimSpace(visionCfg.VisionModel())) {
+		return body
+	}
+	if registry.CodebuddyModelSupportsImages(currentModel) {
+		return body
+	}
+	body = replaceCodebuddyHistoricalImagesWithText(body, codebuddyHistoricalImageText)
+	// Truncated stubs inside the current turn (e.g. re-sent by tool-call
+	// continuation turns) get the same treatment: they carry no usable pixels
+	// and must never reach the vision model or the text model as "images".
+	body = replaceCodebuddyCurrentTurnStubsWithText(body, codebuddyHistoricalImageText)
+	return body
+}
+
+// replaceCodebuddyHistoricalImagesWithText replaces every image part
+// (image_url / input_image) in messages before the current turn (the last user
+// message) with a text part carrying the provided marker. Current-turn image
+// parts are left untouched; they are handled by the preprocess/routing logic.
+func replaceCodebuddyHistoricalImagesWithText(body []byte, text string) []byte {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() {
+		return body
+	}
+	arr := messages.Array()
+	lastUserIdx := lastCodebuddyUserMessageIndex(arr)
+	if lastUserIdx <= 0 {
+		return body
+	}
+
+	out := body
+	for mi := 0; mi < lastUserIdx; mi++ {
+		content := arr[mi].Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		for ci, part := range content.Array() {
+			if !isCodebuddyImagePartType(part.Get("type").String()) {
+				continue
+			}
 			path := fmt.Sprintf("messages.%d.content.%d", mi, ci)
 			replacement, err := json.Marshal(map[string]string{"type": "text", "text": text})
 			if err != nil {
@@ -740,6 +903,9 @@ var codebuddyImagePlaceholderMarkers = []string{
 	"image already analyzed",
 	"base64 content omitted",
 	"image omitted",
+	// Cursor's Read File V2 tool returns a bare confirmation string for image
+	// files (e.g. "Read image file: h:\...\home.png") instead of image data.
+	"read image file",
 }
 
 // codebuddyBackfillReadToolImages detects the CodeBuddy read-tool image workflow
@@ -784,12 +950,36 @@ func codebuddyBackfillReadToolImages(body []byte) []byte {
 	}
 
 	// Collect read-tool image filePaths whose role=tool result is a placeholder.
-	paths := collectCodebuddyReadImagePaths(arr)
+	// Only tool reads from the CURRENT turn (at/after the last user message)
+	// qualify: historical tool reads were already backfilled and described in
+	// their own turn, and re-attaching them to every later question injects
+	// stale, unrelated images (2026-09-05 Cursor incident: an anime picture
+	// the agent read two turns earlier kept being re-described whenever the
+	// user asked about a different, freshly pasted photo).
+	paths := collectCodebuddyReadImagePaths(arr, lastUserIdx)
 	if len(paths) == 0 {
 		return body
 	}
 
 	out := body
+	// The last user message content may be a plain string (Cursor sends string
+	// content on continuation turns). sjson cannot append an array element to a
+	// string: `content.-1` would silently turn the string into a malformed
+	// {"-1": ...} object that neither the vision router nor the upstream
+	// accepts. Normalize non-array content into a text part first so the image
+	// append below yields a valid OpenAI content-part array.
+	contentPath := fmt.Sprintf("messages.%d.content", lastUserIdx)
+	if content := gjson.GetBytes(out, contentPath); content.Exists() && !content.IsArray() {
+		textParts, err := json.Marshal([]map[string]string{{"type": "text", "text": content.String()}})
+		if err != nil {
+			return body
+		}
+		next, err := sjson.SetRawBytes(out, contentPath, textParts)
+		if err != nil {
+			return body
+		}
+		out = next
+	}
 	appended := 0
 	for _, p := range paths {
 		dataURL, mimeType, ok := readCodebuddyImageAsDataURL(p)
@@ -818,7 +1008,12 @@ func codebuddyBackfillReadToolImages(body []byte) []byte {
 // image path. tool_call_id is matched between the assistant tool_calls entry and
 // the following role=tool message (falling back to order-based matching when IDs
 // are absent). The result preserves body order and de-duplicates paths.
-func collectCodebuddyReadImagePaths(messages []gjson.Result) []string {
+//
+// Assistant messages before minAssistantIdx (i.e. before the current turn's
+// last user message) are ignored: their images were already backfilled and
+// described in their own turn, and re-attaching them now would inject stale,
+// unrelated pictures into the user's latest question.
+func collectCodebuddyReadImagePaths(messages []gjson.Result, minAssistantIdx int) []string {
 	type pending struct {
 		id   string
 		path string
@@ -827,10 +1022,15 @@ func collectCodebuddyReadImagePaths(messages []gjson.Result) []string {
 	seenIDs := map[string]bool{}
 	order := []string{}
 
-	for _, m := range messages {
+	for mi, m := range messages {
 		role := m.Get("role").String()
 		switch role {
 		case "assistant":
+			if mi < minAssistantIdx {
+				// Historical tool read: belongs to an earlier turn, do not
+				// re-inject its image into the current question.
+				continue
+			}
 			for _, tc := range m.Get("tool_calls").Array() {
 				name := tc.Get("function.name").String()
 				if name == "" {

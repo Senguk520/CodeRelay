@@ -47,6 +47,39 @@ func buildReadToolImageBody(path string) string {
 	return string(b)
 }
 
+// buildCurrentTurnReadToolImageBody models the in-flight agent loop: the user
+// asked to inspect an image, the assistant called read_file, and the tool
+// result (placeholder) just came back. The read pair sits AT/AFTER the last
+// user message, so the backfill must fire. This is the shape of the
+// continuation request in which the model is supposed to "see" the image.
+func buildCurrentTurnReadToolImageBody(path string) string {
+	args, _ := json.Marshal(map[string]string{"filePath": path})
+	placeholder := "[Image already analyzed in an earlier step; base64 content omitted to save memory. Path: " + path + ". Re-invoke read_file to view it again if needed.]"
+	body := map[string]any{
+		"model": "deepseek-v4-pro",
+		"messages": []any{
+			map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": "看看这张图"}}},
+			map[string]any{
+				"role":    "assistant",
+				"content": nil,
+				"tool_calls": []any{
+					map[string]any{
+						"id":   "call_1",
+						"type": "function",
+						"function": map[string]any{
+							"name":      "read_file",
+							"arguments": string(args),
+						},
+					},
+				},
+			},
+			map[string]any{"role": "tool", "tool_call_id": "call_1", "content": placeholder},
+		},
+	}
+	b, _ := json.Marshal(body)
+	return string(b)
+}
+
 // writeTestPNG writes a minimal valid PNG header + payload so the backfill has a
 // real (small) image file to base64-encode.
 func writeTestPNG(t *testing.T, dir, name string) string {
@@ -64,6 +97,11 @@ func writeTestPNG(t *testing.T, dir, name string) string {
 		0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
 		0x42, 0x60, 0x82,
 	}
+	// Pad the file so its base64 payload exceeds codebuddyImageStubMaxPayloadChars
+	// (512 chars): the vision layer treats tiny data URLs as truncated stubs, and
+	// these tests exercise the real-image path. Trailing bytes after IEND are
+	// ignored by PNG decoders.
+	png = append(png, make([]byte, 800)...)
 	if err := os.WriteFile(p, png, 0o644); err != nil {
 		t.Fatalf("writeTestPNG: %v", err)
 	}
@@ -110,7 +148,7 @@ func TestCodebuddyBackfillReadToolImages_AlreadyHasImage(t *testing.T) {
 func TestCodebuddyBackfillReadToolImages_AttachesFromFilePath(t *testing.T) {
 	dir := t.TempDir()
 	img := writeTestPNG(t, dir, "photo.png")
-	body := buildReadToolImageBody(img)
+	body := buildCurrentTurnReadToolImageBody(img)
 
 	out := codebuddyBackfillReadToolImages([]byte(body))
 
@@ -119,8 +157,8 @@ func TestCodebuddyBackfillReadToolImages_AttachesFromFilePath(t *testing.T) {
 		t.Fatalf("backfill should make codebuddyChatHasImageInput true; out=%s", out)
 	}
 
-	// The image_url part must be appended to the LAST user message (index 4).
-	lastUserContent := gjson.GetBytes(out, "messages.4.content")
+	// The image_url part must be appended to the LAST user message (index 0).
+	lastUserContent := gjson.GetBytes(out, "messages.0.content")
 	if !lastUserContent.IsArray() {
 		t.Fatalf("last user content should be array, got %s", lastUserContent.Raw)
 	}
@@ -145,13 +183,84 @@ func TestCodebuddyBackfillReadToolImages_AttachesFromFilePath(t *testing.T) {
 	}
 
 	// The original text part must be untouched.
-	if parts[0].Get("text").String() != "图里有什么？" {
+	if parts[0].Get("text").String() != "看看这张图" {
 		t.Fatalf("text part corrupted: %s", parts[0].Raw)
 	}
 }
 
+func TestCodebuddyBackfillReadToolImages_HistoricalReadNotReinjected(t *testing.T) {
+	// Regression (2026-09-05 Cursor incident): a read_file pair from an EARLIER
+	// turn (before the last user message) must NOT be re-attached to the new
+	// question. The image was already described in its own turn; re-injecting
+	// it makes the model describe a stale, unrelated picture (an anime image
+	// the agent read earlier bled into answers about a freshly pasted photo).
+	dir := t.TempDir()
+	img := writeTestPNG(t, dir, "photo.png")
+	body := buildReadToolImageBody(img) // tool pair before the last user message
+
+	out := codebuddyBackfillReadToolImages([]byte(body))
+	if string(out) != body {
+		t.Fatalf("historical tool read must not be re-injected, got %s", out)
+	}
+}
+
+func TestCodebuddyBackfillReadToolImages_StringUserContent(t *testing.T) {
+	// Cursor sends plain string content (not a part array) on user messages.
+	// Appending the backfilled image via sjson `content.-1` must first
+	// normalize the string into a text part, otherwise sjson silently produces
+	// a malformed {"-1": ...} object that neither the vision router nor the
+	// upstream accepts. Here the read pair is in the CURRENT turn (agent loop
+	// continuation), so the backfill must fire.
+	dir := t.TempDir()
+	img := writeTestPNG(t, dir, "photo.png")
+	args, _ := json.Marshal(map[string]string{"filePath": img})
+	placeholder := "[Image already analyzed in an earlier step; base64 content omitted to save memory. Path: " + img + ". Re-invoke read_file to view it again if needed.]"
+	body := map[string]any{
+		"model": "deepseek-v4-pro",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "看看这张图片"},
+			map[string]any{
+				"role":    "assistant",
+				"content": nil,
+				"tool_calls": []any{
+					map[string]any{
+						"id":   "call_1",
+						"type": "function",
+						"function": map[string]any{
+							"name":      "read_file",
+							"arguments": string(args),
+						},
+					},
+				},
+			},
+			map[string]any{"role": "tool", "tool_call_id": "call_1", "content": placeholder},
+		},
+	}
+	in, _ := json.Marshal(body)
+
+	out := codebuddyBackfillReadToolImages(in)
+
+	if !codebuddyChatHasImageInput(out) {
+		t.Fatalf("backfill should make codebuddyChatHasImageInput true; out=%s", out)
+	}
+	lastUserContent := gjson.GetBytes(out, "messages.0.content")
+	if !lastUserContent.IsArray() {
+		t.Fatalf("last user content should be normalized to array, got %s", lastUserContent.Raw)
+	}
+	parts := lastUserContent.Array()
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 parts (text + image_url), got %d: %s", len(parts), lastUserContent.Raw)
+	}
+	if parts[0].Get("type").String() != "text" || parts[0].Get("text").String() != "看看这张图片" {
+		t.Fatalf("original string content not preserved as text part: %s", parts[0].Raw)
+	}
+	if parts[1].Get("type").String() != "image_url" || parts[1].Get("image_url.url").String() == "" {
+		t.Fatalf("appended image part malformed: %s", parts[1].Raw)
+	}
+}
+
 func TestCodebuddyBackfillReadToolImages_MissingFileDegrades(t *testing.T) {
-	body := buildReadToolImageBody(filepath.Join(t.TempDir(), "nope.png"))
+	body := buildCurrentTurnReadToolImageBody(filepath.Join(t.TempDir(), "nope.png"))
 	out := codebuddyBackfillReadToolImages([]byte(body))
 	if string(out) != body {
 		t.Fatalf("expected unchanged when file missing, got %s", out)
@@ -164,7 +273,7 @@ func TestCodebuddyBackfillReadToolImages_UnsupportedExtensionDegrades(t *testing
 	if err := os.WriteFile(bad, []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	body := buildReadToolImageBody(bad)
+	body := buildCurrentTurnReadToolImageBody(bad)
 	out := codebuddyBackfillReadToolImages([]byte(body))
 	if string(out) != body {
 		t.Fatalf("expected unchanged for non-image extension, got %s", out)
@@ -173,7 +282,7 @@ func TestCodebuddyBackfillReadToolImages_UnsupportedExtensionDegrades(t *testing
 
 func TestCodebuddyBackfillReadToolImages_NonPlaceholderToolResultIgnored(t *testing.T) {
 	// A read tool whose result is real text (not a placeholder) must NOT trigger
-	// a backfill even if a filePath is present.
+	// a backfill even if a filePath is present — even in the current turn.
 	dir := t.TempDir()
 	img := writeTestPNG(t, dir, "photo.png")
 	args, _ := json.Marshal(map[string]string{"filePath": img})
@@ -188,7 +297,6 @@ func TestCodebuddyBackfillReadToolImages_NonPlaceholderToolResultIgnored(t *test
 				},
 			},
 			map[string]any{"role": "tool", "tool_call_id": "call_1", "content": "文件内容是一段普通文本"},
-			map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": "继续"}}},
 		},
 	}
 	in, _ := json.Marshal(body)
