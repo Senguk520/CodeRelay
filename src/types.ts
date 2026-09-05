@@ -155,7 +155,7 @@ export const defaultConfig: ServiceConfig = {
   sessionAffinity: true,
   visionToolEnabled: true,
   visionMode: 'preprocess',
-  visionModel: 'hy3-preview',
+  visionModel: 'hy4-preview',
   imageGenerationMode: 'enabled',
   debugLogs: false,
 };

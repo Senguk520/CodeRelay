@@ -116,7 +116,7 @@ type CodebuddyVisionConfig struct {
 	Mode string `yaml:"mode" json:"mode"`
 
 	// Model is the vision model used as the routing target / preprocess engine.
-	// Default "hy3-preview".
+	// Default "hy4-preview".
 	Model string `yaml:"model" json:"model"`
 
 	// PreprocessPrompt overrides the user-visible prompt sent to the vision model
@@ -158,11 +158,11 @@ func (c CodebuddyVisionConfig) MaxVisionToolRounds() int {
 	return 3
 }
 
-// VisionModel returns the configured vision model, defaulting to "hy3-preview".
+// VisionModel returns the configured vision model, defaulting to "hy4-preview".
 func (c CodebuddyVisionConfig) VisionModel() string {
 	model := strings.TrimSpace(c.Model)
 	if model == "" {
-		return "hy3-preview"
+		return "hy4-preview"
 	}
 	return model
 }

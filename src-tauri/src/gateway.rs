@@ -468,7 +468,7 @@ fn prepare_runtime_files(
         "off"
     };
     let vision_model = if state.config.vision_model.trim().is_empty() {
-        "hy3-preview".to_string()
+        "hy4-preview".to_string()
     } else {
         state.config.vision_model.trim().to_string()
     };
