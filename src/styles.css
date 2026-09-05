@@ -81,8 +81,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 @keyframes materialize { from { opacity: 0; transform: translateX(-4px) scale(.98); } to { opacity: 1; transform: translateX(0) scale(1); } }
 .popover-label { padding: 5px 9px 7px; color: var(--subtle); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 .nav-item { display: flex; align-items: center; gap: 9px; width: 100%; padding: 9px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: 12px; text-align: left; }
+.nav-item + .nav-item { margin-top: 2px; }
 .nav-item svg:last-child { margin-left: auto; color: var(--green); }
-.nav-item:hover, .nav-item.selected { color: var(--ink); background: var(--surface-hover); }
+.nav-item:hover { color: var(--ink); background: var(--surface-hover); }
+.nav-item.selected { color: var(--ink); background: var(--blue-soft); }
+.nav-item.selected:hover { background: var(--blue-soft); }
 .sidebar-bottom { display: flex; flex-direction: column; align-items: center; gap: 12px; }
 .sidebar-bottom .nav-icon { width: 34px; height: 34px; }
 .avatar { display: grid; place-items: center; width: 27px; height: 27px; border: 1px solid #d5d5cf; border-radius: 50%; color: var(--ink-soft); background: #e8e8e4; font-size: 11px; font-weight: 600; }
