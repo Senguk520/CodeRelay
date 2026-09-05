@@ -103,6 +103,7 @@ type manifest struct {
 	MaxConcurrentImageRequests int                 `json:"maxConcurrentImageRequests"`
 	DebugLogs                  *bool               `json:"debugLogs,omitempty"`
 	VisionMode                 string              `json:"visionMode"`
+	VisionModel                string              `json:"visionModel"`
 
 	apiKeyByValue     map[string]*apiKeySpec
 	accountByID       map[string]*accountSpec

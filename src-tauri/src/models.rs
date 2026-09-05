@@ -112,6 +112,8 @@ pub struct ServiceConfig {
     pub routing_strategy: String,
     pub session_affinity: bool,
     pub vision_tool_enabled: bool,
+    pub vision_mode: String,
+    pub vision_model: String,
     pub image_generation_mode: String,
     pub debug_logs: bool,
 }
@@ -128,6 +130,8 @@ impl Default for ServiceConfig {
             routing_strategy: "auto".to_string(),
             session_affinity: true,
             vision_tool_enabled: true,
+            vision_mode: "preprocess".to_string(),
+            vision_model: "hy3-preview".to_string(),
             image_generation_mode: "enabled".to_string(),
             debug_logs: false,
         }

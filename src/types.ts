@@ -2,6 +2,7 @@ export type PageId = 'overview' | 'service' | 'keys' | 'logs' | 'accounts' | 'mo
 export type ThemeMode = 'light' | 'dark' | 'system';
 export type ServiceScope = 'localhost' | 'lan';
 export type RoutingStrategy = 'auto' | 'random' | 'single_account' | 'quota_high_first' | 'custom';
+export type VisionMode = 'off' | 'routing' | 'preprocess' | 'agentic';
 export type AccountStatus = 'available' | 'needs_auth' | 'cooling' | 'restricted' | 'disabled';
 
 export interface Account {
@@ -68,6 +69,8 @@ export interface ServiceConfig {
   routingStrategy: RoutingStrategy;
   sessionAffinity: boolean;
   visionToolEnabled: boolean;
+  visionMode: VisionMode;
+  visionModel: string;
   imageGenerationMode: 'enabled' | 'images_only' | 'disabled';
   debugLogs: boolean;
 }
@@ -151,6 +154,8 @@ export const defaultConfig: ServiceConfig = {
   routingStrategy: 'auto',
   sessionAffinity: true,
   visionToolEnabled: true,
+  visionMode: 'preprocess',
+  visionModel: 'hy3-preview',
   imageGenerationMode: 'enabled',
   debugLogs: false,
 };
