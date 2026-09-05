@@ -26,11 +26,6 @@ import (
 // autonomously query the vision model for image details during reasoning.
 const inspectImageToolName = "inspect_image"
 
-// codebuddyVisionSubagentSuffix is appended to the request-log model label when
-// a text-only model request is handled by the pure-text vision sub-agent loop
-// (主模型 + 混元视觉子代理), so the log reads e.g. "deepseek-v4-pro视".
-const codebuddyVisionSubagentSuffix = "视"
-
 // codebuddyAgenticImageRef holds an extracted image's original content part,
 // kept in memory so inspect_image can re-send it to the vision model on demand.
 type codebuddyAgenticImageRef struct {
@@ -232,6 +227,247 @@ func (e *CodebuddyExecutor) doCodebuddyChatRequest(
 	return collectChatCompletion(lines), httpResp.Header.Clone(), nil
 }
 
+// doCodebuddyChatRequestWithEmit is doCodebuddyChatRequest with an optional
+// streaming sink: as each content delta is scanned, it is forwarded through
+// emit (if non-nil). The aggregated ChatCompletion is still returned for the
+// caller. This lets the vision sub-agent's answer stream to the client in real
+// time instead of being buffered until the round completes. baseModel is used
+// to rewrite the forwarded chunk's model field so the client always sees the
+// requested model rather than the vision model's backend engine name.
+func (e *CodebuddyExecutor) doCodebuddyChatRequestWithEmit(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	creds codebuddy.Creds,
+	baseURL string,
+	body []byte,
+	baseModel string,
+	emit func([]byte) bool,
+) ([]byte, http.Header, error) {
+	var err error
+	body, err = sjson.SetBytes(body, "stream", true)
+	if err != nil {
+		return nil, nil, err
+	}
+	body, err = sjson.SetBytes(body, "stream_options.include_usage", true)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Clamp oversized max_tokens (Cursor sends 65536) to the model's declared
+	// ceiling, matching the normal request path.
+	body = clampCodebuddyMaxTokens(body, gjson.GetBytes(body, "model").String())
+
+	// Normalize tool-related message fields so the strict backend does not
+	// reject accumulated tool-calling rounds with 400 invalid_parameter_value,
+	// matching the normal request path.
+	body, err = normalizeCodebuddyToolMessages(body)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	url := baseURL + codebuddy.ChatPath
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, nil, err
+	}
+	applyCodebuddyHeaders(httpReq, creds)
+	httpReq.Header.Set("Accept", "text/event-stream")
+
+	// Diagnostic: dump the agentic sub-request body (redacted) so the exact
+	// tools/tool_choice/max_tokens the loop sends can be inspected on failure.
+	helps.DumpCodebuddyDebugBody("agentic-request", body)
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = httpResp.Body.Close() }()
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(httpResp.Body)
+		helps.DumpCodebuddyDebugBody("agentic-error", b)
+		log.Warnf("codebuddy vision agentic: round request failed status=%d body=%s",
+			httpResp.StatusCode, summarize(b))
+		return nil, httpResp.Header.Clone(), statusErr{code: codebuddyEffectiveStatus(httpResp.StatusCode, b), msg: string(b)}
+	}
+
+	lines := make([][]byte, 0, 64)
+	scanner := bufio.NewScanner(httpResp.Body)
+	scanner.Buffer(nil, 52_428_800)
+	for scanner.Scan() {
+		rawLine := scanner.Bytes()
+		// Diagnostic: dump the vision sub-model's raw SSE line (redacted) so the
+		// exact field placement of thinking (reasoning_content vs content) and
+		// the usage token shape can be confirmed. This dump intentionally uses the
+		// raw line so it is unaffected by stripping.
+		helps.DumpCodebuddyDebugBody("vision-raw-sse", rawLine)
+
+		// Strip thinking from the line before it enters either the aggregation
+		// buffer (collectChatCompletion) or the client-forwarding path, so any
+		// thinking that landed inside delta.content never reaches the text-only
+		// model's tool result nor the client.
+		cleaned, drop := stripVisionThinkingLine(rawLine)
+		if drop {
+			continue
+		}
+		lines = append(lines, cleaned)
+
+		if emit != nil {
+			// Forward only visible content deltas to the client. role/reasoning/
+			// usage/finish lines are skipped so the client only sees answer text.
+			trimmed := bytes.TrimSpace(cleaned)
+			if bytes.HasPrefix(trimmed, []byte("data:")) {
+				payload := bytes.TrimSpace(trimmed[len("data:"):])
+				if len(payload) > 0 && !bytes.Equal(payload, []byte("[DONE]")) && gjson.ValidBytes(payload) {
+					for _, ch := range gjson.GetBytes(payload, "choices").Array() {
+						delta := ch.Get("delta")
+						if c := delta.Get("content"); c.Exists() && c.Type == gjson.String && c.String() != "" {
+							// Rewrite the chunk's model field to baseModel so the
+							// client sees a single consistent model name.
+							outLine := trimmed
+							if baseModel != "" {
+								if rewritten, errSet := sjson.SetBytes(payload, "model", baseModel); errSet == nil {
+									outLine = append([]byte("data: "), rewritten...)
+								}
+							}
+							if !emit(outLine) {
+								return nil, httpResp.Header.Clone(), ctx.Err()
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	if errScan := scanner.Err(); errScan != nil {
+		return nil, httpResp.Header.Clone(), errScan
+	}
+	return collectChatCompletion(lines), httpResp.Header.Clone(), nil
+}
+
+// stripVisionThinkingLine cleans a single vision sub-model SSE line so that any
+// thinking text that landed inside delta.content (as opposed to the standard
+// delta.reasoning_content field) is removed before the line is either forwarded
+// to the client or aggregated by collectChatCompletion.
+//
+// It returns:
+//   - cleaned: the line with thinking-only content deltas emptied out. When no
+//     stripping applies, cleaned is a clone of line so the caller can buffer it
+//     without aliasing scanner memory.
+//   - drop: true when the whole line carries nothing but thinking and should be
+//     discarded entirely (no visible content, no structural fields worth keeping).
+//
+// The function is a pure transform with no network/context dependency, so its
+// rules are exhaustively unit-testable.
+//
+// Rules (in priority order):
+//   - A. A delta carrying non-empty reasoning_content and no non-empty content is
+//     thinking-only and is dropped. (This mirrors the existing emit guard.)
+//   - B. A delta with empty content is left structurally intact (finish_reason,
+//     usage, etc. survive) but contributes no visible text.
+//   - C. content text is passed through stripThinkingMarkersFromContent, a
+//     conservative marker table that is currently empty (defensive extension
+//     point only). hy3-preview reports thinking via reasoning_content, so no
+//     content-level marker has been confirmed; we do NOT guess to avoid stripping
+//     legitimate image descriptions.
+func stripVisionThinkingLine(line []byte) (cleaned []byte, drop bool) {
+	trimmed := bytes.TrimSpace(line)
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return bytes.Clone(line), false
+	}
+	payload := bytes.TrimSpace(trimmed[len("data:"):])
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || !gjson.ValidBytes(payload) {
+		return bytes.Clone(line), false
+	}
+
+	choices := gjson.GetBytes(payload, "choices")
+	if !choices.IsArray() || len(choices.Array()) == 0 {
+		return bytes.Clone(line), false
+	}
+
+	changed := false
+	hasVisibleContent := false
+	for i, ch := range choices.Array() {
+		delta := ch.Get("delta")
+		reasoning := delta.Get("reasoning_content")
+		hasReasoning := reasoning.Exists() && reasoning.Type == gjson.String && reasoning.String() != ""
+
+		content := delta.Get("content")
+		hasContent := content.Exists() && content.Type == gjson.String && content.String() != ""
+
+		if hasContent {
+			// Rule C: strip confirmed thinking markers from content (currently a
+			// no-op table; see stripThinkingMarkersFromContent).
+			stripped := stripThinkingMarkersFromContent(content.String())
+			if stripped != content.String() {
+				changed = true
+				payload, _ = sjson.SetBytes(payload, fmt.Sprintf("choices.%d.delta.content", i), stripped)
+			}
+			if strings.TrimSpace(stripped) != "" {
+				hasVisibleContent = true
+			}
+		} else if hasReasoning {
+			// Rule A: reasoning-only delta (no visible content) → mark for drop.
+			changed = true
+		}
+	}
+
+	if !hasVisibleContent {
+		// The line holds only thinking (reasoning-only deltas and/or content that
+		// emptied out after stripping) — nothing worth keeping.
+		return nil, true
+	}
+	if !changed {
+		return bytes.Clone(line), false
+	}
+	return append([]byte("data: "), payload...), false
+}
+
+// stripThinkingMarkersFromContent removes thinking wrapper markers from a content
+// string. It is intentionally conservative: only text bounded by an explicitly
+// listed marker pair is stripped, so normal image-description text is never
+// touched.
+//
+// The marker table is currently empty. hy3-preview reports thinking via the
+// dedicated reasoning_content field, so no content-level marker has been
+// confirmed; guessing would risk stripping legitimate answer text. Add a marker
+// pair here once a real wrapper is captured in the vision-raw-sse diagnostic
+// dump.
+func stripThinkingMarkersFromContent(content string) string {
+	type markerPair struct{ open, close string }
+
+	// Known thinking wrappers observed across reasoning-capable backends. A pair
+	// with an empty close acts as a sentinel prefix: everything up to and
+	// including the sentinel is dropped, the remainder kept.
+	markers := []markerPair{
+		// Example once confirmed (do not enable without a real dump):
+		// {"<thinking>", "</thinking>"},
+	}
+
+	result := content
+	for _, m := range markers {
+		if m.close == "" {
+			if idx := strings.Index(result, m.open); idx >= 0 {
+				result = result[idx+len(m.open):]
+			}
+			continue
+		}
+		for {
+			start := strings.Index(result, m.open)
+			if start < 0 {
+				break
+			}
+			end := strings.Index(result[start+len(m.open):], m.close)
+			if end < 0 {
+				break
+			}
+			end += start + len(m.open) + len(m.close)
+			result = result[:start] + result[end:]
+		}
+	}
+	return result
+}
+
 // inspectCodebuddyImage asks the vision model a specific question about a single
 // image, returning the model's answer text.
 func (e *CodebuddyExecutor) inspectCodebuddyImage(
@@ -242,6 +478,24 @@ func (e *CodebuddyExecutor) inspectCodebuddyImage(
 	imagePart []byte,
 	question string,
 	visionModel string,
+	baseModel string,
+) (string, usage.Detail, error) {
+	return e.inspectCodebuddyImageWithEmit(ctx, auth, creds, baseURL, imagePart, question, visionModel, baseModel, nil)
+}
+
+// inspectCodebuddyImageWithEmit is inspectCodebuddyImage with an optional
+// streaming sink that receives the vision model's content deltas as they arrive.
+// baseModel is used to rewrite the forwarded chunk's model field.
+func (e *CodebuddyExecutor) inspectCodebuddyImageWithEmit(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	creds codebuddy.Creds,
+	baseURL string,
+	imagePart []byte,
+	question string,
+	visionModel string,
+	baseModel string,
+	emit func([]byte) bool,
 ) (string, usage.Detail, error) {
 	userContent := []any{
 		json.RawMessage(imagePart),
@@ -253,15 +507,35 @@ func (e *CodebuddyExecutor) inspectCodebuddyImage(
 			map[string]any{"role": "user", "content": userContent},
 		},
 	}
+	// Disable reasoning on the vision sub-request so the model returns only the
+	// image description text. Reasoning-capable vision models (e.g. hy3-preview)
+	// otherwise emit thinking content that leaks into the forwarded delta and,
+	// worse, gets stored as the tool result the text-only model consumes — which
+	// makes the text-only model believe the image was never actually described.
+	body["reasoning_effort"] = "none"
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
 		return "", usage.Detail{}, err
 	}
 
-	aggregated, _, err := e.doCodebuddyChatRequest(ctx, auth, creds, baseURL, bodyJSON)
+	// Inject the system constraint so the vision model only extracts objective
+	// image details and never proposes solutions/actions. This mirrors the
+	// preprocess path's defaultCodebuddyVisionPrompt and keeps both paths
+	// consistent about "describe, don't advise".
+	bodyJSON, err = prependCodebuddySystemMessage(bodyJSON, codebuddyInspectImageSystemPrompt)
 	if err != nil {
 		return "", usage.Detail{}, err
 	}
+
+	aggregated, _, err := e.doCodebuddyChatRequestWithEmit(ctx, auth, creds, baseURL, bodyJSON, baseModel, emit)
+	if err != nil {
+		return "", usage.Detail{}, err
+	}
+	// Take only the visible answer text. reasoning_content (thinking) is stored
+	// separately by collectChatCompletion and must never become the tool result:
+	// if a reasoning-capable vision model returns only thinking and no answer, we
+	// treat it as an empty answer rather than feeding the thinking back to the
+	// text-only model (which would make it conclude the image was not described).
 	content := strings.TrimSpace(gjson.GetBytes(aggregated, "choices.0.message.content").String())
 	if content == "" {
 		return "", helps.ParseOpenAIUsage(aggregated), fmt.Errorf("vision model returned empty answer")
@@ -282,13 +556,16 @@ func (e *CodebuddyExecutor) runAgenticLoop(
 	body []byte,
 	images []codebuddyAgenticImageRef,
 	visionModel string,
+	baseModel string,
 	maxRounds int,
 	reporter *helps.UsageReporter,
 	heartbeat func(),
+	emit func([]byte) bool,
 ) ([]byte, http.Header, error) {
 	var lastAggregated []byte
 	var lastHeaders http.Header
-	var totalUsage usage.Detail
+	var mainUsage usage.Detail
+	var visionUsage usage.Detail
 
 	// beat emits a downstream keep-alive if the caller supplied one. It is nil
 	// safe so the non-streaming path can pass nil.
@@ -298,16 +575,18 @@ func (e *CodebuddyExecutor) runAgenticLoop(
 		}
 	}
 
-	// Publish the aggregated usage of the whole agentic loop exactly once,
-	// regardless of which return path terminates the loop. The reporter is
-	// constructed with the "<model>视" label upstream so the request log shows
-	// that this text-only model request used the vision sub-agent.
+	// Publish the usage of the agentic loop exactly once per model, regardless
+	// of which return path terminates the loop. The text-only model's usage is
+	// published as the main record, and the vision sub-model's usage as a
+	// separate additional-model record so both credit/token sets are visible.
 	defer func() {
 		if reporter != nil {
 			helps.DumpCodebuddyDebugBody("vision-reporter-publish",
-				[]byte(fmt.Sprintf("model=%s visionSubagent=true inputTokens=%d outputTokens=%d credit=%v",
-					reporter.Model(), totalUsage.InputTokens, totalUsage.OutputTokens, totalUsage.Credit)))
-			reporter.Publish(ctx, totalUsage)
+				[]byte(fmt.Sprintf("model=%s inputTokens=%d outputTokens=%d credit=%v visionInputTokens=%d visionOutputTokens=%d visionCredit=%v",
+					reporter.Model(), mainUsage.InputTokens, mainUsage.OutputTokens, mainUsage.Credit,
+					visionUsage.InputTokens, visionUsage.OutputTokens, visionUsage.Credit)))
+			reporter.Publish(ctx, mainUsage)
+			reporter.PublishAdditionalModelAlways(ctx, visionModel, visionUsage)
 		}
 	}()
 
@@ -324,9 +603,8 @@ func (e *CodebuddyExecutor) runAgenticLoop(
 		lastAggregated = aggregated
 		lastHeaders = headers
 
-		// Accumulate the main-loop usage so the request log's token/credit
-		// columns reflect the entire vision sub-agent conversation.
-		addCodebuddyAgenticUsage(&totalUsage, helps.ParseOpenAIUsage(aggregated))
+		// Accumulate the text-only model's usage into the main record.
+		addCodebuddyAgenticUsage(&mainUsage, helps.ParseOpenAIUsage(aggregated))
 
 		toolCalls := gjson.GetBytes(aggregated, "choices.0.message.tool_calls")
 		if !toolCalls.IsArray() || len(toolCalls.Array()) == 0 {
@@ -357,8 +635,8 @@ func (e *CodebuddyExecutor) runAgenticLoop(
 			var answer string
 			if imageID >= 1 && imageID <= len(images) {
 				beat()
-				a, inspectUsage, inspectErr := e.inspectCodebuddyImage(
-					ctx, auth, creds, baseURL, images[imageID-1].partJSON, question, visionModel,
+				a, inspectUsage, inspectErr := e.inspectCodebuddyImageWithEmit(
+					ctx, auth, creds, baseURL, images[imageID-1].partJSON, question, visionModel, baseModel, emit,
 				)
 				beat()
 				if inspectErr != nil {
@@ -366,9 +644,8 @@ func (e *CodebuddyExecutor) runAgenticLoop(
 					log.Warnf("codebuddy vision agentic: inspect_image(%d) failed: %v", imageID, inspectErr)
 				} else {
 					answer = a
-					// Accumulate the vision sub-model usage so the request log's
-					// token/credit columns include the whole sub-agent loop.
-					addCodebuddyAgenticUsage(&totalUsage, inspectUsage)
+					// Accumulate the vision sub-model usage into its own record.
+					addCodebuddyAgenticUsage(&visionUsage, inspectUsage)
 				}
 			} else {
 				answer = fmt.Sprintf("[无效的图片编号 %d，可用范围 1-%d]", imageID, len(images))
@@ -455,7 +732,7 @@ func (e *CodebuddyExecutor) executeCodebuddyVisionAgentic(
 	log.Infof("codebuddy vision agentic: %d images, model=%s, vision=%s, maxRounds=%d",
 		len(images), baseModel, visionModel, maxRounds)
 
-	aggregated, headers, err := e.runAgenticLoop(ctx, auth, creds, baseURL, body, images, visionModel, maxRounds, reporter, nil)
+	aggregated, headers, err := e.runAgenticLoop(ctx, auth, creds, baseURL, body, images, visionModel, baseModel, maxRounds, reporter, nil, nil)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -520,8 +797,8 @@ func (e *CodebuddyExecutor) executeCodebuddyVisionAgenticStream(
 
 		// 1. Open the stream immediately (role delta) so the relay watchdog
 		//    does not time out while the loop runs.
-		initChunk := []byte("data: " + `{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`)
-		if !emit(initChunk) {
+		initChunk := buildCodebuddyVisionChunk("", baseModel, 0, nil, "assistant")
+		if initChunk != nil && !emit(initChunk) {
 			return
 		}
 
@@ -536,8 +813,15 @@ func (e *CodebuddyExecutor) executeCodebuddyVisionAgenticStream(
 			}
 		}
 
-		// 2. Run the loop (blocking; may take 10-30s).
-		aggregated, _, loopErr := e.runAgenticLoop(ctx, auth, creds, baseURL, body, images, visionModel, maxRounds, reporter, heartbeat)
+		// 2. Run the loop (blocking; may take 10-30s). The vision sub-agent's
+		//    inspect_image answers are streamed to the client in real time via
+		//    inspectEmit, replacing the old post-loop pseudo-replay.
+		inspectEmit := func(line []byte) bool {
+			// Forward the vision model's raw content delta through the same
+			// translator/emit path so the client sees it as assistant content.
+			return emit(line)
+		}
+		aggregated, _, loopErr := e.runAgenticLoop(ctx, auth, creds, baseURL, body, images, visionModel, baseModel, maxRounds, reporter, heartbeat, inspectEmit)
 		if loopErr != nil || aggregated == nil {
 			// Surface the failure as visible assistant content instead of a
 			// silent empty response, and log the full error for diagnosis.

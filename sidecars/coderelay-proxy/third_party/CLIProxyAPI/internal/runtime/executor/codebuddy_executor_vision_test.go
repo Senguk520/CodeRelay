@@ -461,3 +461,97 @@ func TestCodebuddyVisionAgenticEnabled(t *testing.T) {
 		t.Fatal("agentic mode should report enabled")
 	}
 }
+
+// TestDefaultCodebuddyVisionPromptForbidsAdvice guards the regression where the
+// vision model proposed solutions/actions instead of only describing the image.
+// The default preprocess prompt must explicitly forbid solutions/suggestions.
+func TestDefaultCodebuddyVisionPromptForbidsAdvice(t *testing.T) {
+	for _, keyword := range []string{"解决方案", "修改建议", "操作步骤", "分析判断"} {
+		if !strings.Contains(defaultCodebuddyVisionPrompt, keyword) {
+			t.Fatalf("defaultCodebuddyVisionPrompt must forbid %q, got: %s", keyword, defaultCodebuddyVisionPrompt)
+		}
+	}
+	if !strings.Contains(defaultCodebuddyVisionPrompt, "只客观陈述") {
+		t.Fatalf("defaultCodebuddyVisionPrompt must require objective description only")
+	}
+}
+
+// TestBuildCodebuddyVisionPromptFocusedForbidsAdvice guards that the focused
+// (user-question) branch also forbids solutions/suggestions.
+func TestBuildCodebuddyVisionPromptFocusedForbidsAdvice(t *testing.T) {
+	got := buildCodebuddyVisionPrompt("", "图片里的报错是什么")
+	for _, keyword := range []string{"解决方案", "修改建议", "操作步骤", "分析判断", "只客观陈述"} {
+		if !strings.Contains(got, keyword) {
+			t.Fatalf("focused prompt must forbid %q, got: %s", keyword, got)
+		}
+	}
+}
+
+// TestBuildCodebuddyVisionPromptCustomTakesPriority guards that a user-supplied
+// PreprocessPrompt is returned verbatim (no injected constraint), preserving the
+// explicit-override contract.
+func TestBuildCodebuddyVisionPromptCustomTakesPriority(t *testing.T) {
+	custom := "自定义描述 prompt"
+	got := buildCodebuddyVisionPrompt(custom, "任意问题")
+	if got != custom {
+		t.Fatalf("custom prompt must be returned verbatim, got %q", got)
+	}
+}
+
+// TestIsCodebuddyReadToolName guards the read-tool name matching used by the
+// problem-two diagnostic.
+func TestIsCodebuddyReadToolName(t *testing.T) {
+	for _, in := range []string{"read", "Read", "read_file", "READ_FILE", "readfile", "read-file", " Read "} {
+		if !isCodebuddyReadToolName(in) {
+			t.Fatalf("isCodebuddyReadToolName(%q) = false, want true", in)
+		}
+	}
+	for _, in := range []string{"bash", "write", "write_file", "ReadFilex", "globs"} {
+		if isCodebuddyReadToolName(in) {
+			t.Fatalf("isCodebuddyReadToolName(%q) = true, want false", in)
+		}
+	}
+}
+
+// TestCodebuddyBodyMentionsReadTool guards the diagnostic gate detection across
+// tool declarations, assistant tool_calls, and role=tool messages.
+func TestCodebuddyBodyMentionsReadTool(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{
+			name: "tool declaration read",
+			in:   `{"tools":[{"type":"function","function":{"name":"read"}}],"messages":[]}`,
+			want: true,
+		},
+		{
+			name: "assistant tool_calls read",
+			in:   `{"messages":[{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"Read","arguments":"{\"file_path\":\"a.png\"}"}}]}]}`,
+			want: true,
+		},
+		{
+			name: "role tool message",
+			in:   `{"messages":[{"role":"tool","tool_call_id":"c1","content":"text"}]}`,
+			want: true,
+		},
+		{
+			name: "no read tool",
+			in:   `{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`,
+			want: false,
+		},
+		{
+			name: "invalid json",
+			in:   `not-json`,
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := codebuddyBodyMentionsReadTool([]byte(tt.in)); got != tt.want {
+				t.Fatalf("codebuddyBodyMentionsReadTool() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

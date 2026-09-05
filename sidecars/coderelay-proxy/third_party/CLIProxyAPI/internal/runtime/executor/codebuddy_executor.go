@@ -93,8 +93,17 @@ func (e *CodebuddyExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	// clients (Cursor, etc.) may send non-standard image structures.
 	body = normalizeCodebuddyChatImageContent(body)
 
+	// Diagnostic: capture the exact shape of a CodeBuddy read-tool image workflow
+	// that the vision router does not recognize (problem-two investigation).
+	codebuddyDumpReadToolDiagnostic(body)
+
+	// Read-tool image backfill: when the client read an image via read/read_file
+	// and the tool result was reduced to a placeholder (base64 omitted), re-attach
+	// the image from the tool_calls filePath so the vision router recognizes it.
+	body = codebuddyBackfillReadToolImages(body)
+
 	// Vision proxy: transparently handle image input for non-vision models.
-	body, _ = e.applyCodebuddyVisionProxy(ctx, auth, body, baseModel)
+	body, _ = e.applyCodebuddyVisionProxy(ctx, auth, body, baseModel, nil, reporter)
 
 	// Agentic vision: server-side tool-calling loop for text-only models to
 	// autonomously inspect images via the vision model.
@@ -104,7 +113,6 @@ func (e *CodebuddyExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 				[]byte(fmt.Sprintf("path=Execute baseModel=%s visionModel=%s", baseModel, e.cfg.CodebuddyVision.VisionModel())))
 			internallogging.SetVisionSubagent(ctx, true)
 			visionReporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
-			visionReporter.MarkVisionSubagent()
 			defer visionReporter.TrackFailure(ctx, &err)
 			return e.executeCodebuddyVisionAgentic(ctx, auth, req, opts, body, baseModel, creds, baseURL, visionReporter)
 		}
@@ -232,8 +240,25 @@ func (e *CodebuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	// Normalize image content parts to the backend's strict shape.
 	body = normalizeCodebuddyChatImageContent(body)
 
+	// Diagnostic: capture the exact shape of a CodeBuddy read-tool image workflow
+	// that the vision router does not recognize (problem-two investigation).
+	codebuddyDumpReadToolDiagnostic(body)
+
+	// Read-tool image backfill: when the client read an image via read/read_file
+	// and the tool result was reduced to a placeholder (base64 omitted), re-attach
+	// the image from the tool_calls filePath so the vision router recognizes it.
+	body = codebuddyBackfillReadToolImages(body)
+
 	// Vision proxy: transparently handle image input for non-vision models.
-	body, _ = e.applyCodebuddyVisionProxy(ctx, auth, body, baseModel)
+	// Routing is applied synchronously (cheap model swap). Preprocess is deferred
+	// into the stream goroutine below so the vision description can be forwarded
+	// to the client in real time (it takes seconds and must not block the first
+	// byte / trip the relay stream-open watchdog). When preprocess is needed we
+	// keep the original image-bearing body intact here and describe it later.
+	needsPreprocess := e.codebuddyVisionNeedsPreprocess(body, baseModel)
+	if !needsPreprocess {
+		body, _ = e.applyCodebuddyVisionProxy(ctx, auth, body, baseModel, nil, reporter)
+	}
 
 	// Agentic vision: server-side tool-calling loop for text-only models to
 	// autonomously inspect images via the vision model.
@@ -243,7 +268,6 @@ func (e *CodebuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 				[]byte(fmt.Sprintf("path=ExecuteStream baseModel=%s visionModel=%s", baseModel, e.cfg.CodebuddyVision.VisionModel())))
 			internallogging.SetVisionSubagent(ctx, true)
 			visionReporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
-			visionReporter.MarkVisionSubagent()
 			defer visionReporter.TrackFailure(ctx, &err)
 			return e.executeCodebuddyVisionAgenticStream(ctx, auth, req, opts, body, baseModel, creds, baseURL, visionReporter)
 		}
@@ -281,51 +305,12 @@ func (e *CodebuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	body = clampCodebuddyMaxTokens(body, baseModel)
 
 	url := baseURL + codebuddy.ChatPath
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	applyCodebuddyHeaders(httpReq, creds)
-	httpReq.Header.Set("Accept", "text/event-stream")
-	httpReq.Header.Set("Cache-Control", "no-cache")
-	recordCodebuddyRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq, body)
-	// Diagnostic: dump the upstream request body (redacted) so the exact tools
-	// definition Cursor sent can be inspected.
-	helps.DumpCodebuddyDebugBody("upstream-request", body)
-
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, err
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		// Diagnostic: dump the upstream error body (redacted) so the invalid
-		// field / param reported by the backend can be inspected.
-		helps.DumpCodebuddyDebugBody("error-response", b)
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("codebuddy executor: close response body error: %v", errClose)
-		}
-		err = normalizeCodebuddyStatusErr(httpResp.StatusCode, b)
-		return nil, err
-	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
-		defer func() {
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("codebuddy executor: close response body error: %v", errClose)
-			}
-		}()
-		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
-		tcBuf := newCodebuddyStreamToolCallBuffer()
-		emittedToolCalls := false
 		emit := func(line []byte) bool {
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
 			for i := range chunks {
@@ -340,6 +325,97 @@ func (e *CodebuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			}
 			return true
 		}
+
+		// Preprocess streaming: describe the images via the vision model first,
+		// forwarding each description delta to the client in real time, then
+		// rewrite the image parts into text and continue with the text-only model.
+		// The initial role chunk opens the stream immediately so the relay's
+		// stream-open watchdog does not trip during the multi-second vision call.
+		if needsPreprocess {
+			visionModel := e.cfg.CodebuddyVision.VisionModel()
+			initChunk := buildCodebuddyVisionChunk("", baseModel, 0, nil, "assistant")
+			if initChunk != nil && !emit(initChunk) {
+				return
+			}
+			descriptions, visionUsage, descErr := e.describeImagesWithVisionModel(ctx, auth, body, visionModel, e.cfg.CodebuddyVision.PreprocessPrompt, baseModel, emit)
+			if descErr != nil {
+				log.Warnf("codebuddy vision proxy: preprocess stream failed for %s (vision=%s): %v; omitting images", baseModel, visionModel, descErr)
+				body = replaceCodebuddyImagesWithText(body, codebuddyOmittedImageText)
+			} else {
+				log.Infof("codebuddy vision proxy: preprocessed %d image(s) for %s via %s", len(descriptions), baseModel, visionModel)
+				body = replaceCodebuddyImagesWithDescriptions(body, descriptions, codebuddyOmittedImageText)
+				// Report the vision model's usage as a separate additional-model
+				// record, aligned with the agentic path.
+				reporter.PublishAdditionalModelAlways(ctx, visionModel, visionUsage)
+			}
+			// Re-apply the stream forcing so the (rewritten) text-only body still
+			// carries stream=true / include_usage after the image swap.
+			var errSet error
+			body, errSet = sjson.SetBytes(body, "stream", true)
+			if errSet == nil {
+				body, errSet = sjson.SetBytes(body, "stream_options.include_usage", true)
+			}
+			if errSet != nil {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: errSet}:
+				case <-ctx.Done():
+				}
+				return
+			}
+			// Separate the text-model stream translator state from the vision
+			// delta state so the client stream stays coherent.
+			param = nil
+		}
+
+		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if errReq != nil {
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errReq}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		applyCodebuddyHeaders(httpReq, creds)
+		httpReq.Header.Set("Accept", "text/event-stream")
+		httpReq.Header.Set("Cache-Control", "no-cache")
+		recordCodebuddyRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq, body)
+		// Diagnostic: dump the upstream request body (redacted) so the exact tools
+		// definition Cursor sent can be inspected.
+		helps.DumpCodebuddyDebugBody("upstream-request", body)
+
+		httpResp, errDo := httpClient.Do(httpReq)
+		if errDo != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errDo}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		defer func() {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("codebuddy executor: close response body error: %v", errClose)
+			}
+		}()
+		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+			b, _ := io.ReadAll(httpResp.Body)
+			helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+			// Diagnostic: dump the upstream error body (redacted) so the invalid
+			// field / param reported by the backend can be inspected.
+			helps.DumpCodebuddyDebugBody("error-response", b)
+			errNorm := normalizeCodebuddyStatusErr(httpResp.StatusCode, b)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errNorm}:
+			case <-ctx.Done():
+			}
+			return
+		}
+
+		scanner := bufio.NewScanner(httpResp.Body)
+		scanner.Buffer(nil, 52_428_800) // 50MB
+		tcBuf := newCodebuddyStreamToolCallBuffer()
+		emittedToolCalls := false
 		emitToolCalls := func() bool {
 			if emittedToolCalls || !tcBuf.HasToolCalls() {
 				return true
@@ -394,7 +470,7 @@ func (e *CodebuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		}
 		emit([]byte("data: [DONE]"))
 	}()
-	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+	return &cliproxyexecutor.StreamResult{Chunks: out}, nil
 }
 
 // CountTokens is not supported for CodeBuddy.
