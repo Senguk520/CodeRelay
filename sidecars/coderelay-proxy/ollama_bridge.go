@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 
@@ -97,10 +96,6 @@ func (s *relayServer) handleOllamaChat(c *gin.Context) {
 	openAIBody, stream, err := buildOpenAIChatRequestFromOllama(body)
 	if err != nil {
 		writeAPIError(c, http.StatusBadRequest, err.Error(), "invalid_request")
-		return
-	}
-	if spec.ProviderGateway != nil {
-		s.handleOllamaProviderGatewayChat(c, spec.ProviderGateway, openAIBody, canonical, stream)
 		return
 	}
 	if stream {
@@ -409,98 +404,6 @@ func (s *relayServer) forwardOllamaRuntimeStream(c *gin.Context, ctx context.Con
 			flusher.Flush()
 		}
 	}
-}
-
-func (s *relayServer) handleOllamaProviderGatewayChat(c *gin.Context, gateway *providerGatewaySpec, body []byte, model string, stream bool) {
-	if gateway == nil {
-		writeAPIError(c, http.StatusBadGateway, "provider gateway is not configured", "bad_gateway")
-		return
-	}
-	if normalizeProviderGatewayWireAPI(gateway.WireAPI) != "chat_completions" {
-		writeAPIError(c, http.StatusBadRequest, "Ollama bridge requires provider gateway wire API chat_completions", "invalid_request")
-		return
-	}
-	upstreamModel := providerGatewayCanonicalModel(gateway, model)
-	if strings.TrimSpace(upstreamModel) == "" {
-		writeAPIError(c, http.StatusNotFound, fmt.Sprintf("model %s is not available for this provider gateway", model), "model_not_available")
-		return
-	}
-	upstreamBody := rewriteProviderGatewayBodyModel(body, upstreamModel)
-	upstreamURL, err := providerGatewayURL(gateway.BaseURL, "/v1/chat/completions")
-	if err != nil {
-		writeAPIError(c, http.StatusBadGateway, err.Error(), "bad_gateway")
-		return
-	}
-	req, err := http.NewRequestWithContext(relayContext(c), http.MethodPost, upstreamURL, bytes.NewReader(upstreamBody))
-	if err != nil {
-		writeAPIError(c, http.StatusBadGateway, err.Error(), "bad_gateway")
-		return
-	}
-	req.Header.Set("Authorization", "Bearer "+gateway.APIKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	if stream {
-		req.Header.Set("Accept", "text/event-stream")
-	}
-	copyProviderGatewayDiagnosticHeaders(req.Header, c.Request.Header)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		writeAPIError(c, http.StatusBadGateway, err.Error(), "bad_gateway")
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		payload, _ := io.ReadAll(resp.Body)
-		contentType := resp.Header.Get("Content-Type")
-		if contentType == "" {
-			contentType = "application/json"
-		}
-		c.Data(resp.StatusCode, contentType, payload)
-		return
-	}
-	if stream {
-		s.forwardOllamaProviderGatewayStream(c, resp.Body, upstreamModel, resp.Header)
-		return
-	}
-	payload, err := io.ReadAll(resp.Body)
-	if err != nil {
-		writeAPIError(c, http.StatusBadGateway, err.Error(), "bad_gateway")
-		return
-	}
-	writeUpstreamHeaders(c.Writer.Header(), resp.Header)
-	c.Data(http.StatusOK, "application/json", convertOpenAIChatResponseToOllama(payload, upstreamModel))
-}
-
-func (s *relayServer) forwardOllamaProviderGatewayStream(c *gin.Context, body io.Reader, model string, headers http.Header) {
-	flusher, ok := c.Writer.(http.Flusher)
-	if !ok {
-		writeAPIError(c, http.StatusInternalServerError, "streaming not supported", "streaming_not_supported")
-		return
-	}
-	c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	writeUpstreamHeaders(c.Writer.Header(), headers)
-	c.Status(http.StatusOK)
-
-	state := newOllamaStreamState(model)
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		for _, payload := range openAIStreamPayloadsFromChunk(scanner.Bytes()) {
-			for _, event := range state.applyOpenAIChunk(payload) {
-				writeOllamaJSONLine(c.Writer, event)
-			}
-		}
-		flusher.Flush()
-	}
-	if err := scanner.Err(); err != nil {
-		writeOllamaErrorLine(c.Writer, err)
-		flusher.Flush()
-		return
-	}
-	writeOllamaJSONLine(c.Writer, state.finalChunk())
-	flusher.Flush()
 }
 
 type ollamaToolCallAccumulator struct {

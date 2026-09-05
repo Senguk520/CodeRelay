@@ -416,7 +416,6 @@ func TestCodexClientModelsResponseDoesNotInjectFastMode(t *testing.T) {
 	}{
 		{name: "plain API key", spec: &apiKeySpec{}},
 		{name: "OAuth-bound API key", spec: &apiKeySpec{BoundOAuth: true}},
-		{name: "provider gateway", spec: &apiKeySpec{ProviderGateway: &providerGatewaySpec{}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			response := buildCodexClientModelsResponse([]string{"gpt-5.6-sol", "custom-compat-model"}, test.spec, nil)
@@ -444,6 +443,23 @@ func TestCodexClientModelsResponseDoesNotInjectFastMode(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRequestVisionDetectionIgnoresToolSchemaFieldNames(t *testing.T) {
+	body := []byte(`{
+		"model":"deepseek-v4-pro",
+		"tools":[{
+			"type":"function",
+			"name":"inspect_url",
+			"parameters":{
+				"type":"object",
+				"properties":{"image_url":{"type":"string"}}
+			}
+		}]
+	}`)
+	if requestHasVisionInput(body) {
+		t.Fatal("tool schema field names must not be treated as image input")
 	}
 }
 
@@ -634,158 +650,6 @@ func TestRelayServerCodeRelayQuotaRequiresKeyAndIsolatesAccountScopes(t *testing
 		if response.RemainingPercent == nil || *response.RemainingPercent != want || response.AccountCount != 1 {
 			t.Fatalf("key %q received another scope: %#v", key, response)
 		}
-	}
-}
-
-func TestRelayServerCodeRelayQuotaUpstreamFailureReturnsScopedEmptyState(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "unavailable", http.StatusBadGateway)
-	}))
-	defer upstream.Close()
-
-	statePath := filepath.Join(t.TempDir(), "quota-pool-state.json")
-	if err := os.WriteFile(statePath, []byte(`{"accounts":{}}`), 0o600); err != nil {
-		t.Fatalf("write quota state: %v", err)
-	}
-	spec := &apiKeySpec{
-		ID:         "provider-key",
-		Key:        "client-key",
-		Enabled:    true,
-		AccountIDs: []string{"provider-account"},
-		ProviderGateway: &providerGatewaySpec{
-			BaseURL: upstream.URL,
-			APIKey:  "upstream-key",
-		},
-	}
-	manifest := &manifest{apiKeyByValue: map[string]*apiKeySpec{spec.Key: spec}}
-	router := (&relayServer{
-		runtime:            &fakeRuntime{},
-		cfg:                &config.Config{},
-		manifest:           manifest,
-		policy:             &requestPolicy{manifest: manifest},
-		quotaPoolStatePath: statePath,
-	}).router()
-
-	req := httptest.NewRequest(http.MethodGet, coderelayQuotaPath, nil)
-	req.Header.Set("Authorization", "Bearer client-key")
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
-	}
-	var response coderelayQuotaResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if response.RemainingPercent != nil || response.AccountCount != 1 || response.MissingAccountCount != 1 {
-		t.Fatalf("upstream failure should keep local scoped empty state: %#v", response)
-	}
-}
-
-func TestCodexClientModelsResponseDisablesSearchForProviderGateway(t *testing.T) {
-	response := buildCodexClientModelsResponse([]string{"gpt-5.6-sol"}, &apiKeySpec{
-		ProviderGateway: &providerGatewaySpec{},
-	}, nil)
-	models, ok := response["models"].([]map[string]any)
-	if !ok {
-		t.Fatalf("models response should contain a models array: %#v", response["models"])
-	}
-	sol := findCodexClientModelForTest(models, "gpt-5.6-sol")
-	if sol == nil {
-		t.Fatal("expected gpt-5.6-sol")
-	}
-	if got, ok := sol["supports_search_tool"].(bool); !ok || got {
-		t.Fatalf("provider gateway supports_search_tool = %#v, want false", sol["supports_search_tool"])
-	}
-}
-
-func TestCodexClientModelsResponseGatesProviderGatewayImageInput(t *testing.T) {
-	tests := []struct {
-		name          string
-		gateway       *providerGatewaySpec
-		model         string
-		supportsImage bool
-	}{
-		{
-			name: "text only defaults to image capable",
-			gateway: &providerGatewaySpec{
-				UpstreamModels: []string{"deepseek-v4-pro"},
-			},
-			model:         "deepseek-v4-pro",
-			supportsImage: true,
-		},
-		{
-			name: "model supports vision",
-			gateway: &providerGatewaySpec{
-				UpstreamModels: []string{"qwen-vl-plus"},
-				ModelCapabilities: map[string]providerGatewayModelCapability{
-					"qwen-vl-plus": {SupportsVision: true},
-				},
-			},
-			model:         "qwen-vl-plus",
-			supportsImage: true,
-		},
-		{
-			name: "routes images to vision model",
-			gateway: &providerGatewaySpec{
-				UpstreamModels:     []string{"deepseek-v4-pro", "qwen-vl-plus"},
-				VisionRoutingModel: "qwen-vl-plus",
-				ModelCapabilities: map[string]providerGatewayModelCapability{
-					"qwen-vl-plus": {SupportsVision: true},
-				},
-			},
-			model:         "deepseek-v4-pro",
-			supportsImage: true,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			response := buildCodexClientModelsResponse([]string{test.model}, &apiKeySpec{
-				ProviderGateway: test.gateway,
-			}, nil)
-			models, ok := response["models"].([]map[string]any)
-			if !ok {
-				t.Fatalf("models response should contain a models array: %#v", response["models"])
-			}
-			entry := findCodexClientModelForTest(models, test.model)
-			if entry == nil {
-				t.Fatalf("expected model %s", test.model)
-			}
-			modalities, ok := entry["input_modalities"].([]any)
-			if !ok {
-				t.Fatalf("input_modalities = %#v", entry["input_modalities"])
-			}
-			want := []any{"text"}
-			if test.supportsImage {
-				want = []any{"text", "image"}
-			}
-			if !reflect.DeepEqual(modalities, want) {
-				t.Fatalf("input_modalities = %#v, want %#v", modalities, want)
-			}
-			_, hasImageDetail := entry["supports_image_detail_original"]
-			if hasImageDetail != test.supportsImage {
-				t.Fatalf("supports_image_detail_original present = %v, want %v", hasImageDetail, test.supportsImage)
-			}
-		})
-	}
-}
-
-func TestProviderGatewayVisionDetectionIgnoresToolSchemaFieldNames(t *testing.T) {
-	body := []byte(`{
-		"model":"deepseek-v4-pro",
-		"tools":[{
-			"type":"function",
-			"name":"inspect_url",
-			"parameters":{
-				"type":"object",
-				"properties":{"image_url":{"type":"string"}}
-			}
-		}]
-	}`)
-	if providerGatewayRequestHasVisionInput(body) {
-		t.Fatal("tool schema field names must not be treated as image input")
 	}
 }
 

@@ -385,26 +385,6 @@ func (s *relayServer) handleCodeRelayQuota(c *gin.Context) {
 	if s.authManager != nil {
 		applyCodeRelayQuotaAuthHealth(&response, spec, state, s.authManager.List(), time.Now())
 	}
-	if response.RemainingPercent == nil && spec != nil && spec.ProviderGateway != nil {
-		upstreamURL, urlErr := providerGatewayURL(spec.ProviderGateway.BaseURL, coderelayQuotaPath)
-		if urlErr == nil {
-			request, requestErr := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, upstreamURL, nil)
-			if requestErr == nil {
-				request.Header.Set("Authorization", "Bearer "+spec.ProviderGateway.APIKey)
-				client := &http.Client{Timeout: 2 * time.Second}
-				if upstream, doErr := client.Do(request); doErr == nil {
-					defer upstream.Body.Close()
-					if upstream.StatusCode == http.StatusOK {
-						var upstreamResponse coderelayQuotaResponse
-						if json.NewDecoder(upstream.Body).Decode(&upstreamResponse) == nil {
-							c.JSON(http.StatusOK, upstreamResponse)
-							return
-						}
-					}
-				}
-			}
-		}
-	}
 	c.JSON(http.StatusOK, response)
 }
 
@@ -602,12 +582,7 @@ func (s *relayServer) handleResponses(c *gin.Context) {
 }
 
 func (s *relayServer) handleCodexLive(c *gin.Context) {
-	spec, ok := s.requireAPIKey(c)
-	if !ok {
-		return
-	}
-	if spec.ProviderGateway != nil {
-		writeAPIError(c, http.StatusBadRequest, "provider gateway does not support Codex live", "live_not_supported")
+	if _, ok := s.requireAPIKey(c); !ok {
 		return
 	}
 	if s.codexLive == nil {
@@ -618,12 +593,7 @@ func (s *relayServer) handleCodexLive(c *gin.Context) {
 }
 
 func (s *relayServer) handleCodexLiveSideband(c *gin.Context) {
-	spec, ok := s.requireAPIKey(c)
-	if !ok {
-		return
-	}
-	if spec.ProviderGateway != nil {
-		writeAPIError(c, http.StatusBadRequest, "provider gateway does not support Codex live", "live_not_supported")
+	if _, ok := s.requireAPIKey(c); !ok {
 		return
 	}
 	if s.codexLive == nil {
@@ -634,12 +604,7 @@ func (s *relayServer) handleCodexLiveSideband(c *gin.Context) {
 }
 
 func (s *relayServer) codexRealtimeHandler(c *gin.Context, handle func(*codexlive.Handler, *gin.Context)) {
-	spec, ok := s.requireAPIKey(c)
-	if !ok {
-		return
-	}
-	if spec.ProviderGateway != nil {
-		writeAPIError(c, http.StatusBadRequest, "provider gateway does not support Codex realtime", "realtime_not_supported")
+	if _, ok := s.requireAPIKey(c); !ok {
 		return
 	}
 	if s.codexLive == nil {
@@ -686,15 +651,6 @@ func (s *relayServer) handleResponsesWebsocket(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if spec.ProviderGateway != nil {
-		writeAPIError(
-			c,
-			http.StatusBadRequest,
-			"provider gateway does not support responses websocket",
-			"websocket_not_supported",
-		)
-		return
-	}
 	if !spec.ResponsesWebsockets {
 		writeAPIError(c, http.StatusBadRequest, "responses websocket is disabled", "websocket_disabled")
 		return
@@ -721,10 +677,6 @@ func (s *relayServer) handleResponsesCompact(c *gin.Context) {
 func (s *relayServer) handleCodexAlphaSearch(c *gin.Context) {
 	spec, ok := s.requireAPIKey(c)
 	if !ok {
-		return
-	}
-	if spec.ProviderGateway != nil {
-		writeAPIError(c, http.StatusNotFound, "provider gateway does not support /v1/alpha/search", "not_found")
 		return
 	}
 	searcher, ok := s.runtime.(codexAlphaSearcher)

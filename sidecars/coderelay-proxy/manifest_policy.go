@@ -120,19 +120,18 @@ type manifest struct {
 }
 
 type apiKeySpec struct {
-	ID                  string               `json:"id"`
-	Label               string               `json:"label"`
-	Key                 string               `json:"key"`
-	ProviderGateway     *providerGatewaySpec `json:"providerGateway,omitempty"`
-	BoundOAuth          bool                 `json:"boundOAuth,omitempty"`
-	AccountIDs          []string             `json:"accountIds"`
-	ModelPrefix         string               `json:"modelPrefix,omitempty"`
-	ResponsesWebsockets bool                 `json:"responsesWebsockets,omitempty"`
-	AllowedModels       []string             `json:"allowedModels"`
-	ExcludedModels      []string             `json:"excludedModels"`
-	TokenLimit          uint64               `json:"tokenLimit,omitempty"`
-	TokenUsed           uint64               `json:"tokenUsed,omitempty"`
-	Enabled             bool                 `json:"enabled"`
+	ID                  string   `json:"id"`
+	Label               string   `json:"label"`
+	Key                 string   `json:"key"`
+	BoundOAuth          bool     `json:"boundOAuth,omitempty"`
+	AccountIDs          []string `json:"accountIds"`
+	ModelPrefix         string   `json:"modelPrefix,omitempty"`
+	ResponsesWebsockets bool     `json:"responsesWebsockets,omitempty"`
+	AllowedModels       []string `json:"allowedModels"`
+	ExcludedModels      []string `json:"excludedModels"`
+	TokenLimit          uint64   `json:"tokenLimit,omitempty"`
+	TokenUsed           uint64   `json:"tokenUsed,omitempty"`
+	Enabled             bool     `json:"enabled"`
 }
 
 type apiKeyTokenState struct {
@@ -304,22 +303,6 @@ func (s *apiKeyPriorityStateStore) reloadIfChanged() {
 	s.lastModUnixNano = modifiedAt
 	s.priorities = next
 	s.mu.Unlock()
-}
-
-type providerGatewaySpec struct {
-	BaseURL            string                                    `json:"baseUrl"`
-	APIKey             string                                    `json:"apiKey"`
-	UpstreamModel      string                                    `json:"upstreamModel"`
-	UpstreamModels     []string                                  `json:"upstreamModels,omitempty"`
-	WireAPI            string                                    `json:"wireApi,omitempty"`
-	SupportsVision     bool                                      `json:"supportsVision,omitempty"`
-	ModelCapabilities  map[string]providerGatewayModelCapability `json:"modelCapabilities,omitempty"`
-	VisionRoutingModel string                                    `json:"visionRoutingModel,omitempty"`
-	VisionModel        string                                    `json:"visionModel,omitempty"`
-}
-
-type providerGatewayModelCapability struct {
-	SupportsVision bool `json:"supportsVision,omitempty"`
 }
 
 type accountSpec struct {
@@ -789,21 +772,6 @@ func loadManifest(path string) (*manifest, error) {
 			continue
 		}
 		m.APIKeys[i].Key = key
-		if gateway := m.APIKeys[i].ProviderGateway; gateway != nil {
-			gateway.BaseURL = strings.TrimSpace(gateway.BaseURL)
-			gateway.APIKey = strings.TrimSpace(gateway.APIKey)
-			gateway.UpstreamModel = strings.TrimSpace(gateway.UpstreamModel)
-			gateway.UpstreamModels = normalizeStringList(gateway.UpstreamModels)
-			gateway.VisionRoutingModel = strings.TrimSpace(gateway.VisionRoutingModel)
-			if len(gateway.UpstreamModels) == 0 && gateway.UpstreamModel != "" {
-				gateway.UpstreamModels = []string{gateway.UpstreamModel}
-			}
-			gateway.WireAPI = normalizeProviderGatewayWireAPI(gateway.WireAPI)
-			gateway.ModelCapabilities = normalizeProviderGatewayModelCapabilities(gateway.ModelCapabilities)
-			if gateway.BaseURL == "" || gateway.APIKey == "" {
-				m.APIKeys[i].ProviderGateway = nil
-			}
-		}
 		m.apiKeyByValue[key] = &m.APIKeys[i]
 	}
 	m.accountByID = make(map[string]*accountSpec)
@@ -878,33 +846,6 @@ func normalizeStringList(values []string) []string {
 		}
 		seen[key] = struct{}{}
 		out = append(out, trimmed)
-	}
-	return out
-}
-
-func normalizeProviderGatewayWireAPI(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "chat_completions", "chat-completions", "openai_chat", "openai-chat", "chat":
-		return "chat_completions"
-	default:
-		return "responses"
-	}
-}
-
-func normalizeProviderGatewayModelCapabilities(value map[string]providerGatewayModelCapability) map[string]providerGatewayModelCapability {
-	if len(value) == 0 {
-		return nil
-	}
-	out := make(map[string]providerGatewayModelCapability, len(value))
-	for model, capability := range value {
-		key := strings.ToLower(strings.TrimSpace(model))
-		if key == "" {
-			continue
-		}
-		out[key] = capability
-	}
-	if len(out) == 0 {
-		return nil
 	}
 	return out
 }
@@ -1548,19 +1489,13 @@ func buildCodexClientModelsResponse(models []string, spec *apiKeySpec, windows m
 		sourceModels = append(sourceModels, entry)
 	}
 	response := gin.H(codexmodels.BuildResponse(sourceModels, func(string) []string {
-		if spec != nil && spec.ProviderGateway != nil {
-			return []string{"provider-gateway"}
-		}
 		return []string{"codex"}
 	}, false))
 	if data, ok := response["models"].([]map[string]any); ok {
 		hydrateCodexCompatibilityModels(data)
-		preferWebsockets := spec != nil && spec.ProviderGateway == nil && spec.ResponsesWebsockets
+		preferWebsockets := spec != nil && spec.ResponsesWebsockets
 		for _, model := range data {
 			model["prefer_websockets"] = preferWebsockets
-			if spec != nil && spec.ProviderGateway != nil {
-				applyProviderGatewayCodexInputModalities(model, spec.ProviderGateway)
-			}
 			slug, _ := model["slug"].(string)
 			if isHiddenCodexClientModel(slug) {
 				model["visibility"] = "hide"
@@ -1588,20 +1523,6 @@ func buildCodexClientModelsResponse(models []string, spec *apiKeySpec, windows m
 		applyExplicitContextWindows(data, windows)
 	}
 	return response
-}
-
-func applyProviderGatewayCodexInputModalities(model map[string]any, gateway *providerGatewaySpec) {
-	slug, _ := model["slug"].(string)
-	slug = strings.TrimSpace(slug)
-	supportsImage := providerGatewayModelSupportsVision(gateway, slug) ||
-		strings.TrimSpace(providerGatewayVisionRoutingModel(gateway)) != ""
-	if supportsImage {
-		model["input_modalities"] = []any{"text", "image"}
-		model["supports_image_detail_original"] = true
-		return
-	}
-	model["input_modalities"] = []any{"text"}
-	delete(model, "supports_image_detail_original")
 }
 
 func intModelValueAny(value any) int {
@@ -1835,20 +1756,6 @@ func visibleModelsForAPIKey(m *manifest, spec *apiKeySpec) []string {
 	if m == nil {
 		return nil
 	}
-	if spec != nil && spec.ProviderGateway != nil {
-		models := make([]string, 0, len(spec.ProviderGateway.UpstreamModels))
-		for _, upstreamModel := range spec.ProviderGateway.UpstreamModels {
-			clientModel := upstreamModel
-			for _, alias := range m.ModelAliases {
-				if strings.EqualFold(alias.SourceModel, upstreamModel) {
-					clientModel = alias.Alias
-					break
-				}
-			}
-			models = append(models, clientModel)
-		}
-		return normalizeStringList(models)
-	}
 	models := applyModelFilters(m.modelIDs(), nil, m.ExcludedModels)
 	if spec != nil {
 		models = applyModelFilters(models, spec.AllowedModels, spec.ExcludedModels)
@@ -1884,14 +1791,6 @@ func canonicalModelForClientModel(m *manifest, spec *apiKeySpec, model string) s
 	if isCodexInternalModel(withoutPrefix) {
 		return codexAutoReviewModel
 	}
-	if spec != nil && spec.ProviderGateway != nil {
-		if m != nil {
-			if source := m.aliasToSource[strings.ToLower(withoutPrefix)]; source != "" {
-				withoutPrefix = source
-			}
-		}
-		return providerGatewayCanonicalModel(spec.ProviderGateway, withoutPrefix)
-	}
 	if m != nil {
 		if source := m.aliasToSource[strings.ToLower(withoutPrefix)]; source != "" {
 			return source
@@ -1900,109 +1799,10 @@ func canonicalModelForClientModel(m *manifest, spec *apiKeySpec, model string) s
 	return resolveSupportedModelAlias(m, withoutPrefix)
 }
 
-func providerGatewayCanonicalModel(gateway *providerGatewaySpec, model string) string {
-	if gateway == nil {
-		return strings.TrimSpace(model)
-	}
-	model = strings.TrimSpace(model)
-	if len(gateway.UpstreamModels) == 0 && strings.TrimSpace(gateway.UpstreamModel) == "" {
-		return model
-	}
-	for _, upstreamModel := range gateway.UpstreamModels {
-		if strings.EqualFold(model, upstreamModel) {
-			return upstreamModel
-		}
-	}
-	return strings.TrimSpace(gateway.UpstreamModel)
-}
-
-func providerGatewayModelSupportsVision(gateway *providerGatewaySpec, model string) bool {
-	// 默认放行图片输入：未显式声明图片能力时，不删图、不换占位符，base64 直接透传给第三方上游。
-	if gateway == nil {
-		return true
-	}
-	key := strings.ToLower(strings.TrimSpace(model))
-	if key != "" && gateway.ModelCapabilities != nil {
-		if capability, ok := gateway.ModelCapabilities[key]; ok {
-			return capability.SupportsVision
-		}
-	}
-	return true
-}
-
-func providerGatewayModelCapabilityOverridesVision(gateway *providerGatewaySpec, model string) (bool, bool) {
-	if gateway == nil {
-		return false, false
-	}
-	key := strings.ToLower(strings.TrimSpace(model))
-	if key == "" || gateway.ModelCapabilities == nil {
-		return false, false
-	}
-	capability, ok := gateway.ModelCapabilities[key]
-	if !ok {
-		return false, false
-	}
-	return capability.SupportsVision, true
-}
-
-func providerGatewayVisionRoutingModel(gateway *providerGatewaySpec) string {
-	if gateway == nil {
-		return ""
-	}
-	model := strings.TrimSpace(gateway.VisionRoutingModel)
-	if model != "" && len(gateway.UpstreamModels) > 0 {
-		matched := ""
-		for _, upstreamModel := range gateway.UpstreamModels {
-			if strings.EqualFold(model, upstreamModel) {
-				matched = upstreamModel
-				break
-			}
-		}
-		if matched == "" {
-			return ""
-		}
-		model = matched
-	}
-	if model != "" && providerGatewayModelSupportsVision(gateway, model) {
-		return model
-	}
-	if model != "" {
-		return ""
-	}
-	visionModel := ""
-	for rawModel, capability := range gateway.ModelCapabilities {
-		if !capability.SupportsVision {
-			continue
-		}
-		model = strings.TrimSpace(rawModel)
-		if model == "" {
-			continue
-		}
-		if len(gateway.UpstreamModels) > 0 {
-			matched := ""
-			for _, upstreamModel := range gateway.UpstreamModels {
-				if strings.EqualFold(model, upstreamModel) {
-					matched = upstreamModel
-					break
-				}
-			}
-			if matched == "" {
-				continue
-			}
-			model = matched
-		}
-		if visionModel != "" && !strings.EqualFold(visionModel, model) {
-			return ""
-		}
-		visionModel = model
-	}
-	if visionModel != "" && providerGatewayModelSupportsVision(gateway, visionModel) {
-		return visionModel
-	}
-	return ""
-}
-
-func providerGatewayRequestHasVisionInput(body []byte) bool {
+// requestHasVisionInput reports whether a request body carries image input
+// (OpenAI image_url parts or Responses input_image parts). It is used by the
+// stream watchdog to extend the idle timeout for vision sub-agent loops.
+func requestHasVisionInput(body []byte) bool {
 	if len(body) == 0 || !json.Valid(body) {
 		return false
 	}
@@ -2010,80 +1810,28 @@ func providerGatewayRequestHasVisionInput(body []byte) bool {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return false
 	}
-	return providerGatewayValueHasVisionInput(payload)
+	return valueHasVisionInput(payload)
 }
 
-func providerGatewayValueHasVisionInput(value any) bool {
+func valueHasVisionInput(value any) bool {
 	switch typed := value.(type) {
 	case map[string]any:
 		if typ, _ := typed["type"].(string); strings.EqualFold(strings.TrimSpace(typ), "input_image") || strings.EqualFold(strings.TrimSpace(typ), "image_url") {
 			return true
 		}
 		for _, child := range typed {
-			if providerGatewayValueHasVisionInput(child) {
+			if valueHasVisionInput(child) {
 				return true
 			}
 		}
 	case []any:
 		for _, child := range typed {
-			if providerGatewayValueHasVisionInput(child) {
+			if valueHasVisionInput(child) {
 				return true
 			}
 		}
 	}
 	return false
-}
-
-const providerGatewayOmittedImageText = "[Image omitted because the current model does not support image input.]"
-
-func omitProviderGatewayVisionInput(body []byte, sourceFormat sdktranslator.Format) ([]byte, int, error) {
-	var payload any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, 0, err
-	}
-	textType := "text"
-	if sourceFormatEqual(sourceFormat, sdktranslator.FormatOpenAIResponse) {
-		textType = "input_text"
-	}
-	omitted, count := omitProviderGatewayVisionValue(payload, textType)
-	if count == 0 {
-		return body, 0, nil
-	}
-	normalized, err := json.Marshal(omitted)
-	if err != nil {
-		return nil, 0, err
-	}
-	return normalized, count, nil
-}
-
-func omitProviderGatewayVisionValue(value any, textType string) (any, int) {
-	switch typed := value.(type) {
-	case map[string]any:
-		typ, _ := typed["type"].(string)
-		if strings.EqualFold(strings.TrimSpace(typ), "input_image") || strings.EqualFold(strings.TrimSpace(typ), "image_url") {
-			return map[string]any{
-				"type": textType,
-				"text": providerGatewayOmittedImageText,
-			}, 1
-		}
-		count := 0
-		for key, child := range typed {
-			next, childCount := omitProviderGatewayVisionValue(child, textType)
-			typed[key] = next
-			count += childCount
-		}
-		return typed, count
-	case []any:
-		count := 0
-		for index, child := range typed {
-			next, childCount := omitProviderGatewayVisionValue(child, textType)
-			typed[index] = next
-			count += childCount
-		}
-		return typed, count
-	default:
-		return value, 0
-	}
 }
 
 func stripModelPrefix(model string, spec *apiKeySpec) string {
@@ -2142,17 +1890,6 @@ func validateClientModelVisible(m *manifest, spec *apiKeySpec, model, canonical 
 	withoutPrefix := stripModelPrefix(model, spec)
 	if isCodexInternalModel(withoutPrefix) || isCodexInternalModel(canonical) {
 		return true
-	}
-	if spec != nil && spec.ProviderGateway != nil {
-		if len(spec.ProviderGateway.UpstreamModels) == 0 {
-			return true
-		}
-		for _, upstreamModel := range spec.ProviderGateway.UpstreamModels {
-			if strings.EqualFold(canonical, upstreamModel) {
-				return true
-			}
-		}
-		return false
 	}
 	visible := visibleModelsForAPIKey(m, nil)
 	visibleMatch := false
