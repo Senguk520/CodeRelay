@@ -1009,7 +1009,16 @@ func ParseGeminiCLIStreamUsage(line []byte) (usage.Detail, bool) {
 	if !node.Exists() {
 		return usage.Detail{}, false
 	}
-	return parseGeminiFamilyUsageDetail(node), true
+	detail := parseGeminiFamilyUsageDetail(node)
+	// A usageMetadata node that carries no token figures at all (for example
+	// traffic-type-only metadata such as {"trafficType":"ON_DEMAND"}) is
+	// upstream bookkeeping noise, not real usage. Report it as "no usage" so
+	// stream callers do not publish empty zero-token records for it.
+	if detail.TotalTokens == 0 && detail.InputTokens == 0 && detail.OutputTokens == 0 &&
+		detail.ReasoningTokens == 0 && detail.CachedTokens == 0 {
+		return usage.Detail{}, false
+	}
+	return detail, true
 }
 
 func firstExistingUsageNode(root gjson.Result, paths ...string) gjson.Result {
